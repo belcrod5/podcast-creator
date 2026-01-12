@@ -84,7 +84,7 @@ brew install ffmpeg
 ダウンロードしたファイルを **Applications** フォルダ配下に配置します。
 
 ## サンプルアセットのダウンロード
-[Sample.zip](https://github.com/belcrod5/podcast-creator/releases/latest/download/Sample.zip)
+[Sample.zip](https://github.com/belcrod5/podcast-creator/releases/download/sample-1.0.0/Sample.zip)
 サンプルアセットの圧縮ファイルを、お好きな場所に展開してください。
 
 ## アプリの起動
