@@ -1,0 +1,11 @@
+/node_modules
+/dist
+/assets/
+credentials.json
+token.json
+token_*.json
+unsplash-settings.json
+allowed-domains.json
+youtube-token*.json
+.env
+/release/
