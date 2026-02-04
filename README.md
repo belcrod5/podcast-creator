@@ -102,7 +102,51 @@ brew install ffmpeg
     - `fonts/`: フォント（任意。なければシステムフォントにフォールバック）
 - 作業ディレクトリは、アプリ内の **「設定」→「変更…」** からいつでも切り替えできます。
 
-以下を「作業ディレクトリ」説明の近くに追記すればOKです（そのままコピペ用）。
+## CLIで動画生成（ヘッドレス）
+UIを起動せず、JSON入力で動画生成〜YouTubeアップロードまで実行できます。
+
+### 実行方法
+**`.app` から実行（推奨）**
+```
+/Applications/Podcast\ Creator.app/Contents/MacOS/Podcast\ Creator \
+  --podcast /path/to/podcast.json \
+  --workdir /path/to/workdir
+```
+
+**Node で実行（開発向け）**
+```
+node electron/cli/podcast-runner.js --podcast /path/to/podcast.json --workdir /path/to/workdir
+```
+
+### podcast.json 例
+```
+{
+  "preset": "preset1",
+  "script": [
+    { "text": "こんにちは", "id": "speaker_001" },
+    { "insert_video": "videos/clip.mp4", "startTime": "00:00:05", "endTime": "00:00:10" }
+  ],
+  "youtube": {
+    "title": "Episode 1",
+    "description": "本文",
+    "tags": ["tag1", "tag2"],
+    "category": "22",
+    "thumbnailPath": "assets/thumbs/ep1.jpg"
+  },
+  "insertVideoMapping": "videos/output.mp4.json"
+}
+```
+
+### 仕様の要点
+- `preset` / `script` / `youtube` は必須。
+- `youtube.thumbnailPath` は **任意**（未指定でもOK）。
+- `preset` は `assets/data/podcastcreator-preset.json` の **ID** を指定。
+- `script` の話者IDは `preset.lang` に応じて検証されます（無効IDはエラー）。
+- `fixedDescription` は `preset.fixedDescription` → `youtube.fixedDescription` の順で `youtube.description` に追記。
+- `insertVideoMapping` は任意。未指定時は `videos/output.mp4.json` を探し、無ければ警告のみでスキップ。
+- CLIは `processing-complete` まで待機し、成功時は exit code 0 / 失敗時は 1。
+
+※ UIと同じ生成パイプラインを使うため、AivisSpeech / ImageMagick / FFmpeg のセットアップはGUIと同様に必要です。
 
 
 ## フォント（任意・おすすめ）

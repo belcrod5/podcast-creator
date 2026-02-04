@@ -21,6 +21,24 @@ const APP_ICON_PATH = path.join(APP_ROOT, 'app-resources', 'app-ico.png');
 
 let WORK_DIR = null;
 
+const readArgValue = (args, flag) => {
+    const prefix = `${flag}=`;
+    for (let i = 0; i < args.length; i += 1) {
+        const entry = args[i];
+        if (entry === flag) {
+            return args[i + 1];
+        }
+        if (typeof entry === 'string' && entry.startsWith(prefix)) {
+            return entry.slice(prefix.length);
+        }
+    }
+    return null;
+};
+
+const CLI_PODCAST_PATH = readArgValue(process.argv, '--podcast');
+const CLI_WORK_DIR = readArgValue(process.argv, '--workdir');
+const IS_PODCAST_CLI = typeof CLI_PODCAST_PATH === 'string' && CLI_PODCAST_PATH.trim();
+
 const SETTINGS_FILE_NAME = 'podcast-creator-settings.json';
 
 const getSettingsFilePath = () => path.join(app.getPath('userData'), SETTINGS_FILE_NAME);
@@ -944,6 +962,44 @@ app.whenReady().then(async () => {
             console.error('Failed to set Dock icon:', error);
         }
     }
+    if (IS_PODCAST_CLI) {
+        const resolvedWorkDir = (typeof CLI_WORK_DIR === 'string' && CLI_WORK_DIR.trim())
+            ? CLI_WORK_DIR.trim()
+            : (typeof process.env.PODCAST_CREATOR_WORKDIR === 'string' ? process.env.PODCAST_CREATOR_WORKDIR.trim() : '');
+
+        if (!resolvedWorkDir) {
+            console.error('Missing workdir. Set PODCAST_CREATOR_WORKDIR or pass --workdir.');
+            app.exit(1);
+            return;
+        }
+
+        WORK_DIR = resolvedWorkDir;
+        process.env.PODCAST_CREATOR_WORKDIR = resolvedWorkDir;
+
+        ttsService = require('./tts-service');
+        if (ttsService && typeof ttsService.setWorkDir === 'function') {
+            try {
+                ttsService.setWorkDir(resolvedWorkDir);
+            } catch (error) {
+                console.error('TTSサービスの作業ディレクトリ設定に失敗しました:', error);
+            }
+        }
+
+        try {
+            const { runPodcastRunner } = require('./cli/podcast-runner');
+            const exitCode = await runPodcastRunner({
+                podcastPath: CLI_PODCAST_PATH,
+                workDir: resolvedWorkDir,
+                ttsService
+            });
+            app.exit(exitCode);
+        } catch (error) {
+            console.error('Podcast CLI failed:', error?.message || error);
+            app.exit(1);
+        }
+        return;
+    }
+
     await ensureWorkDir();
     // 作業ディレクトリ確定後に読み込む（配布時に .app 内へ書き込みしないため）
     ttsService = require('./tts-service');
@@ -958,12 +1014,14 @@ app.whenReady().then(async () => {
 });
 
 app.on('window-all-closed', () => {
+    if (IS_PODCAST_CLI) return;
     if (process.platform !== 'darwin') {
         app.quit();
     }
 });
 
 app.on('activate', async () => {
+    if (IS_PODCAST_CLI) return;
     if (BrowserWindow.getAllWindows().length === 0) {
         await createWindow();
     }
