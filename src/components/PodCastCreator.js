@@ -58,7 +58,7 @@ const {
 } = require('../../shared/podcast-script');
 const PodCastProgressBar = require('./PodCastProgressBar');
 const path = require('path');
-const PRESET_CONFIG_PATH = 'assets/data/podcastcreator-preset.json';
+const PRESET_CONFIG_PATH = 'data/podcastcreator-preset.json';
 const YOUTUBE_TOKEN_CUSTOM_VALUE = '__YOUTUBE_TOKEN_CUSTOM__';
 const YOUTUBE_TOKEN_CUSTOM_LABEL = '新規作成...';
 const YOUTUBE_TOKEN_SELECT_LABEL = '選択してください';
@@ -782,6 +782,7 @@ const PodCastCreator = () => {
 
     // まず、ローディング状態を示す状態変数を追加
     const [isLoadingImagesFromJson, setIsLoadingImagesFromJson] = useState(false);
+    const [isRestoringFromSave, setIsRestoringFromSave] = useState(false);
 
     // ステート変数の部分に追加
     const [dragOver, setDragOver] = useState(-1);
@@ -1274,6 +1275,160 @@ const PodCastCreator = () => {
         }
     };
 
+    const handleRestoreLatestSave = async () => {
+        if (!window?.electron?.podcastSaves?.read) {
+            alert('この環境ではセーブデータ復帰が利用できません');
+            return;
+        }
+
+        try {
+            setIsRestoringFromSave(true);
+            const response = await window.electron.podcastSaves.read({});
+            if (!response?.success || !response?.record?.request) {
+                alert('復帰できるセーブデータが見つかりませんでした');
+                return;
+            }
+
+            const request = response.record.request || {};
+            const youtube = (request && typeof request.youtube === 'object' && request.youtube !== null) ? request.youtube : {};
+            const runtimeOverrides = (request && typeof request.runtimeOverrides === 'object' && request.runtimeOverrides !== null)
+                ? request.runtimeOverrides
+                : {};
+
+            const restoredScriptItems = normalizeScriptItems(
+                Array.isArray(request.script) ? request.script : [],
+                { defaultInsertVideoPath: DEFAULT_INSERT_VIDEO_PATH }
+            );
+
+            const scriptSpeakerId = restoredScriptItems.find((item = {}) => item?.id || item?.speakerId);
+            const restoredSpeakerId = scriptSpeakerId?.id || scriptSpeakerId?.speakerId || formData.script.speakerId || availableSpeakerIds[0] || '';
+            const restoredLanguageRaw = runtimeOverrides.language
+                || restoredScriptItems.find((item = {}) => typeof item?.language === 'string')?.language
+                || formData.script.language
+                || 'ja';
+            const restoredLanguage = restoredLanguageRaw === 'en' ? 'en' : 'ja';
+            const restoredTags = Array.isArray(youtube.tags) ? youtube.tags.join(',') : (youtube.tags || '');
+            const restoredCategory = youtube.category || youtube.categoryId || '22';
+            const restoredBackgroundText = runtimeOverrides.backgroundText || youtube.title || '';
+
+            setScriptItems(restoredScriptItems);
+            setFormData(prev => ({
+                ...prev,
+                script: {
+                    ...prev.script,
+                    text: JSON.stringify(restoredScriptItems),
+                    speakerId: restoredSpeakerId,
+                    language: restoredLanguage
+                },
+                youtubeInfo: {
+                    ...prev.youtubeInfo,
+                    title: youtube.title || '',
+                    description: youtube.description || '',
+                    tags: restoredTags,
+                    categoryId: restoredCategory,
+                    thumbnailPath: youtube.thumbnailPath || ''
+                },
+                backgroundImage: {
+                    ...prev.backgroundImage,
+                    text: restoredBackgroundText
+                }
+            }));
+
+            if (typeof youtube.fixedDescription === 'string') {
+                setFixedYoutubeDescription(youtube.fixedDescription);
+            }
+
+            if (typeof request.preset === 'string' && request.preset.trim()) {
+                const presetId = request.preset.trim();
+                if (presets.some((preset) => preset?.id === presetId)) {
+                    setSelectedPresetId(presetId);
+                }
+            }
+
+            if (typeof runtimeOverrides.videoFormat === 'string' && runtimeOverrides.videoFormat.trim()) {
+                setVideoFormat(normalizeVideoFormat(runtimeOverrides.videoFormat.trim()));
+            }
+
+            if (Number.isFinite(Number(runtimeOverrides.playbackSpeed))) {
+                const clampedSpeed = Math.min(Math.max(Number(runtimeOverrides.playbackSpeed), 0.1), 2.0);
+                setPlaybackSpeed(clampedSpeed);
+            }
+
+            if (typeof runtimeOverrides.autoUpload === 'boolean') {
+                setAutoUploadToYoutube(runtimeOverrides.autoUpload);
+            }
+
+            if (typeof runtimeOverrides.speakerVideoPrefix === 'string') {
+                setSpeakerVideoPrefix(runtimeOverrides.speakerVideoPrefix);
+            }
+
+            if (Number.isFinite(Number(runtimeOverrides.bgmVolume))) {
+                const nextVolume = Math.min(Math.max(Number(runtimeOverrides.bgmVolume), 0), 1);
+                setBgmVolume(nextVolume);
+            }
+
+            if (typeof runtimeOverrides.captionsEnabled === 'boolean') {
+                setCaptionsEnabled(runtimeOverrides.captionsEnabled);
+            }
+
+            if (typeof runtimeOverrides.introBgVideo === 'string') {
+                setSelectedIntroBgVideo(runtimeOverrides.introBgVideo);
+            }
+
+            const restoredYoutubeToken = (typeof runtimeOverrides.youtubeToken === 'string')
+                ? runtimeOverrides.youtubeToken.trim()
+                : '';
+            if (restoredYoutubeToken) {
+                setSelectedYoutubeToken(restoredYoutubeToken);
+                setYoutubeTokenFile(restoredYoutubeToken);
+                try {
+                    await window.electron.tts.setYoutubeTokenFile(restoredYoutubeToken);
+                } catch (error) {
+                    console.error('復帰時のYouTubeトークン設定に失敗しました:', error);
+                }
+            } else {
+                setSelectedYoutubeToken('');
+                setYoutubeTokenFile('');
+            }
+
+            const restoredBgm = (typeof runtimeOverrides.bgm === 'string') ? runtimeOverrides.bgm.trim() : '';
+            if (restoredBgm) {
+                const targetBgm = bgmList.find((item) => item?.fileName === restoredBgm);
+                if (targetBgm?.path) {
+                    setSelectedBgm(restoredBgm);
+                    try {
+                        await window.electron.tts.setBgm(targetBgm.path);
+                    } catch (error) {
+                        console.error('復帰時のBGM設定に失敗しました:', error);
+                    }
+                } else {
+                    setSelectedBgm('');
+                    try {
+                        await window.electron.tts.setBgm('');
+                    } catch (_) {
+                        /* ignore */
+                    }
+                }
+            } else {
+                setSelectedBgm('');
+                try {
+                    await window.electron.tts.setBgm('');
+                } catch (_) {
+                    /* ignore */
+                }
+            }
+
+            setYoutubeTokenError(false);
+            setYoutubeTokenDialogOpen(false);
+            alert(`セーブデータを復帰しました: ${response.record.id}`);
+        } catch (error) {
+            console.error('セーブデータ復帰エラー:', error);
+            alert(`セーブデータの復帰に失敗しました: ${error.message}`);
+        } finally {
+            setIsRestoringFromSave(false);
+        }
+    };
+
     // スクリプトテキストが変更されたときにスクリプトアイテムを更新
     useEffect(() => {
         if (skipScriptTextSyncRef.current) {
@@ -1561,14 +1716,33 @@ const PodCastCreator = () => {
         const combinedDescription = appendFixed
             ? (baseDescription ? `${baseDescription}\n${appendFixed}` : appendFixed)
             : baseDescription;
+        const selectedBgmPath = (bgmList || []).find((item) => item?.fileName === selectedBgm)?.path || '';
 
         const queuePayload = {
             ...formData,
             youtubeInfo: {
                 ...formData.youtubeInfo,
-                description: combinedDescription
+                description: combinedDescription,
+                baseDescription,
+                fixedDescription: appendFixed
             },
-            videoFormat
+            videoFormat,
+            presetId: selectedPresetId || '',
+            insertVideoMapping: DEFAULT_INSERT_VIDEO_MAPPING_PATH,
+            runtimeOverrides: {
+                videoFormat,
+                playbackSpeed,
+                autoUpload: autoUploadToYoutube,
+                youtubeToken: selectedYoutubeToken || youtubeTokenFile || '',
+                speakerVideoPrefix,
+                bgm: selectedBgm || '',
+                bgmPath: selectedBgmPath,
+                bgmVolume,
+                captionsEnabled,
+                introBgVideo: selectedIntroBgVideo || '',
+                backgroundText: formData.backgroundImage.text || formData.youtubeInfo.title || '',
+                language: formData.script.language || 'ja'
+            }
         };
 
         addToQueue(queuePayload);
@@ -2719,24 +2893,33 @@ const PodCastCreator = () => {
                         <Button
                             variant="outlined"
                             onClick={handleJsonPaste}
-                            disabled={isLoadingImagesFromJson}
+                            disabled={isLoadingImagesFromJson || isRestoringFromSave}
                             sx={{ mr: 1 }}
                         >
                             JSONをペースト
                         </Button>
                         <Button
                             variant="outlined"
+                            onClick={handleRestoreLatestSave}
+                            disabled={isLoadingImagesFromJson || isRestoringFromSave}
+                            sx={{ mr: 1 }}
+                        >
+                            前回から復帰
+                        </Button>
+                        <Button
+                            variant="outlined"
                             color="primary"
                             onClick={adjustInsertVideoTimings}
+                            disabled={isRestoringFromSave}
                             sx={{ mr: 1 }}
                         >
                             Insert動画時間調整
                         </Button>
-                        {isLoadingImagesFromJson && (
+                        {(isLoadingImagesFromJson || isRestoringFromSave) && (
                             <Box sx={{ display: 'flex', alignItems: 'center' }}>
                                 <CircularProgress size={24} sx={{ mr: 1 }} />
                                 <Typography variant="body2" color="text.secondary">
-                                    画像読み込み中...
+                                    {isRestoringFromSave ? 'セーブデータ復帰中...' : '画像読み込み中...'}
                                 </Typography>
                             </Box>
                         )}

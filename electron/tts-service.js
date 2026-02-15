@@ -40,19 +40,8 @@ const setWorkDirRoot = (value) => {
     return WORK_DIR;
 };
 
-// assets の置き方を2パターン許容する:
-// 1) 作業DIR/assets/...
-// 2) 作業DIR が assets そのもの（作業DIR/data, backgrounds...）
-const getAssetsPath = () => {
-    const root = getWorkDir();
-    const nested = path.join(root, 'assets');
-    try {
-        if (fs.existsSync(nested) && fs.statSync(nested).isDirectory()) {
-            return nested;
-        }
-    } catch (_) { /* ignore */ }
-    return root;
-};
+// 素材ルートは常に作業ディレクトリ直下に固定する。
+const getAssetsPath = () => getWorkDir();
 
 // YouTube設定は作業DIR/config/youtube に集約（local は廃止）
 const getYoutubeConfigDir = () => path.join(getWorkDir(), 'config', 'youtube');

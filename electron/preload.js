@@ -2,6 +2,12 @@ const { contextBridge, ipcRenderer, clipboard, nativeImage } = require('electron
 
 contextBridge.exposeInMainWorld('electron', {
     openExternal: (url) => ipcRenderer.invoke('open-external', url),
+    podcastSaves: {
+        create: (payload) => ipcRenderer.invoke('podcast-save-create', payload),
+        list: (payload) => ipcRenderer.invoke('podcast-save-list', payload),
+        read: (payload) => ipcRenderer.invoke('podcast-save-read', payload),
+        updateResult: (payload) => ipcRenderer.invoke('podcast-save-update-result', payload)
+    },
     settings: {
         getWorkDir: () => ipcRenderer.invoke('app-get-work-dir'),
         selectWorkDir: () => ipcRenderer.invoke('app-select-work-dir'),

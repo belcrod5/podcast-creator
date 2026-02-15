@@ -94,12 +94,13 @@ brew install ffmpeg
 - 素材や設定は「作業ディレクトリ」側に置きます。
 - 作業ディレクトリ構成（例）
   - `config/`: 設定（YouTubeの `credentials.json` / `youtube-token*.json` など）
-  - `assets/`（または作業ディレクトリ直下）: 素材置き場
+  - 素材置き場（作業ディレクトリ直下）
     - `data/`: プリセット/サンプルなどのJSON
     - `backgrounds/`: BGM(.mp3) / イントロ背景動画(.mp4/.mov/.mkv/.avi)
     - `speaker-videos/`: スピーカー動画（例: `<speakerId>.mp4`, `<speakerId>_<mood>.mp4`）
     - `se/`: SE素材
     - `fonts/`: フォント（任意。なければシステムフォントにフォールバック）
+  - `/.podcast-creator/`: セーブデータ・内部キャッシュ
 - 作業ディレクトリは、アプリ内の **「設定」→「変更…」** からいつでも切り替えできます。
 
 ## CLIで動画生成（ヘッドレス）
@@ -116,6 +117,19 @@ UIを起動せず、JSON入力で動画生成〜YouTubeアップロードまで�
 **Node で実行（開発向け）**
 ```
 node electron/cli/podcast-runner.js --podcast /path/to/podcast.json --workdir /path/to/workdir
+```
+
+**直前のセーブデータから再実行**
+```
+/Applications/Podcast\ Creator.app/Contents/MacOS/Podcast\ Creator \
+  --resume latest \
+  --workdir /path/to/workdir
+```
+または特定ファイル:
+```
+node electron/cli/podcast-runner.js \
+  --resume /path/to/workdir/.podcast-creator/saves/<save-id>.podcast-save.json \
+  --workdir /path/to/workdir
 ```
 
 ### podcast.json 例
@@ -140,11 +154,13 @@ node electron/cli/podcast-runner.js --podcast /path/to/podcast.json --workdir /p
 ### 仕様の要点
 - `preset` / `script` / `youtube` は必須。
 - `youtube.thumbnailPath` は **任意**（未指定でもOK）。
-- `preset` は `assets/data/podcastcreator-preset.json` の **ID** を指定。
+- `preset` は `data/podcastcreator-preset.json` の **ID** を指定。
 - `script` の話者IDは `preset.lang` に応じて検証されます（無効IDはエラー）。
 - `fixedDescription` は `preset.fixedDescription` → `youtube.fixedDescription` の順で `youtube.description` に追記。
 - `insertVideoMapping` は任意。未指定時は `videos/output.mp4.json` を探し、無ければ警告のみでスキップ。
 - CLIは `processing-complete` まで待機し、成功時は exit code 0 / 失敗時は 1。
+- GUI/CLIどちらの実行でも、実行内容は `<workdir>/.podcast-creator/saves/` にセーブされます。
+- `--resume latest` で最新セーブを再実行できます。
 
 ※ UIと同じ生成パイプラインを使うため、AivisSpeech / ImageMagick / FFmpeg のセットアップはGUIと同様に必要です。
 

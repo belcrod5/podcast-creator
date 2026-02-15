@@ -4,8 +4,15 @@ const {
     normalizeScriptItems,
     adjustInsertVideoTimingsCore
 } = require('../../shared/podcast-script');
+const {
+    buildCanonicalRequest,
+    createSaveRecord,
+    writeSaveRecord,
+    loadSaveRecord,
+    updateSaveRecordResult
+} = require('../../shared/podcast-save-data');
 
-const PRESET_CONFIG_PATH = 'assets/data/podcastcreator-preset.json';
+const PRESET_CONFIG_PATH = 'data/podcastcreator-preset.json';
 const DEFAULT_INSERT_VIDEO_PATH = 'videos/output.mp4';
 const DEFAULT_INSERT_VIDEO_MAPPING_PATH = `${DEFAULT_INSERT_VIDEO_PATH}.json`;
 
@@ -52,6 +59,7 @@ const parseCliArgs = (argv = []) => {
 
     return {
         podcastPath: readValue('--podcast'),
+        resumePath: readValue('--resume'),
         workDir: readValue('--workdir')
     };
 };
@@ -62,17 +70,7 @@ const resolveWorkPath = (targetPath, workDir) => {
     const trimmed = normalizedTarget.trim();
     if (!trimmed) return null;
 
-    let resolved = path.isAbsolute(trimmed) ? trimmed : path.join(workDir, trimmed);
-    if (!path.isAbsolute(trimmed) && !fs.existsSync(resolved)) {
-        const stripped = trimmed.replace(/^assets[\\/]+/, '');
-        if (stripped !== trimmed) {
-            const alt = path.join(workDir, stripped);
-            if (fs.existsSync(alt)) {
-                resolved = alt;
-            }
-        }
-    }
-    return resolved;
+    return path.isAbsolute(trimmed) ? trimmed : path.join(workDir, trimmed);
 };
 
 const readJsonFile = (targetPath, workDir, label = 'JSON') => {
@@ -110,14 +108,6 @@ const normalizeLanguage = (value) => (
 
 const resolveAssetsRoot = (workDir) => {
     if (!workDir) return null;
-    const nested = path.join(workDir, 'assets');
-    try {
-        if (fs.existsSync(nested) && fs.statSync(nested).isDirectory()) {
-            return nested;
-        }
-    } catch (_) {
-        /* ignore */
-    }
     return workDir;
 };
 
@@ -163,20 +153,63 @@ const formatProgress = (value) => {
     return `${Math.round(value * 100)}%`;
 };
 
+const resolvePodcastInput = ({ podcastPath, resumePath, workDir }) => {
+    const normalizedResumePath = (typeof resumePath === 'string' && resumePath.trim())
+        ? resumePath.trim()
+        : '';
+    if (normalizedResumePath) {
+        const loaded = normalizedResumePath === 'latest'
+            ? loadSaveRecord({ workDir })
+            : loadSaveRecord({ workDir, filePath: normalizedResumePath });
+
+        const request = isPlainObject(loaded?.record?.request) ? loaded.record.request : {};
+        const youtube = isPlainObject(request.youtube) ? request.youtube : {};
+        const runtimeOverrides = isPlainObject(request.runtimeOverrides) ? request.runtimeOverrides : {};
+
+        return {
+            podcast: {
+                preset: request.preset,
+                script: Array.isArray(request.script) ? request.script : [],
+                youtube: {
+                    title: youtube.title ?? '',
+                    description: youtube.description ?? '',
+                    tags: youtube.tags ?? '',
+                    category: youtube.category ?? youtube.categoryId ?? '22',
+                    thumbnailPath: youtube.thumbnailPath ?? '',
+                    fixedDescription: youtube.fixedDescription ?? ''
+                },
+                insertVideoMapping: request.insertVideoMapping ?? DEFAULT_INSERT_VIDEO_MAPPING_PATH,
+                runtimeOverrides
+            },
+            loadedSave: loaded
+        };
+    }
+
+    const normalizedPodcastPath = (typeof podcastPath === 'string' && podcastPath.trim()) ? podcastPath.trim() : '';
+    if (!normalizedPodcastPath) {
+        throw new Error('Missing podcast JSON. Pass --podcast /path/to/podcast.json or --resume latest');
+    }
+    const podcastResult = readJsonFile(normalizedPodcastPath, workDir, 'podcast.json');
+    const podcast = podcastResult.data;
+    return {
+        podcast,
+        loadedSave: null
+    };
+};
+
 const runPodcastRunner = async ({
     podcastPath,
+    resumePath,
     workDir,
     ttsService,
     log = console
 } = {}) => {
+    let saveRecordRef = null;
+    let normalizedWorkDir = null;
     try {
-        const normalizedWorkDir = (typeof workDir === 'string' && workDir.trim()) ? workDir.trim() : null;
+        normalizedWorkDir = (typeof workDir === 'string' && workDir.trim()) ? workDir.trim() : null;
         if (!normalizedWorkDir) {
             throw new Error('Missing workdir. Set PODCAST_CREATOR_WORKDIR or pass --workdir.');
-        }
-        const normalizedPodcastPath = (typeof podcastPath === 'string' && podcastPath.trim()) ? podcastPath.trim() : '';
-        if (!normalizedPodcastPath) {
-            throw new Error('Missing podcast JSON. Pass --podcast /path/to/podcast.json');
         }
         if (!ttsService) {
             throw new Error('ttsService is not available');
@@ -187,8 +220,15 @@ const runPodcastRunner = async ({
             ttsService.setWorkDir(normalizedWorkDir);
         }
 
-        const podcastResult = readJsonFile(normalizedPodcastPath, normalizedWorkDir, 'podcast.json');
-        const podcast = podcastResult.data;
+        const { podcast, loadedSave } = resolvePodcastInput({
+            podcastPath,
+            resumePath,
+            workDir: normalizedWorkDir
+        });
+        if (loadedSave?.filePath) {
+            log.info?.(`[resume] loaded save: ${loadedSave.filePath}`);
+        }
+
         const missingPodcastFields = getMissingKeys(podcast, PODCAST_REQUIRED_FIELDS);
         if (missingPodcastFields.length) {
             throw new Error(`Missing podcast fields: ${missingPodcastFields.join(', ')}`);
@@ -206,6 +246,8 @@ const runPodcastRunner = async ({
             throw new Error(`Missing youtube fields: ${missingYoutubeFields.join(', ')}`);
         }
 
+        const runtimeOverrides = isPlainObject(podcast.runtimeOverrides) ? podcast.runtimeOverrides : {};
+
         const presetConfig = readJsonFile(PRESET_CONFIG_PATH, normalizedWorkDir, 'preset config');
         const presets = resolvePresetList(presetConfig.data);
         if (!presets) {
@@ -221,9 +263,41 @@ const runPodcastRunner = async ({
             throw new Error(`Missing preset fields: ${missingPresetFields.join(', ')}`);
         }
 
+        const effectiveLanguage = normalizeLanguage(runtimeOverrides.language || preset.lang);
+        const effectiveVideoFormat = (typeof runtimeOverrides.videoFormat === 'string' && runtimeOverrides.videoFormat.trim())
+            ? runtimeOverrides.videoFormat.trim()
+            : preset.videoFormat;
+        const effectivePlaybackSpeed = Number.isFinite(Number(runtimeOverrides.playbackSpeed))
+            ? Math.min(Math.max(Number(runtimeOverrides.playbackSpeed), 0.1), 2.0)
+            : preset.playbackSpeed;
+        const effectiveAutoUpload = (typeof runtimeOverrides.autoUpload === 'boolean')
+            ? runtimeOverrides.autoUpload
+            : preset.autoUpload;
+        const effectiveYoutubeToken = (typeof runtimeOverrides.youtubeToken === 'string' && runtimeOverrides.youtubeToken.trim())
+            ? runtimeOverrides.youtubeToken.trim()
+            : ((typeof preset.youtubeToken === 'string' && preset.youtubeToken.trim()) ? preset.youtubeToken.trim() : '');
+        const effectiveSpeakerVideoPrefix = (typeof runtimeOverrides.speakerVideoPrefix === 'string')
+            ? runtimeOverrides.speakerVideoPrefix
+            : preset.speakerVideoPrefix;
+        const effectiveBgmName = (typeof runtimeOverrides.bgm === 'string' && runtimeOverrides.bgm.trim())
+            ? runtimeOverrides.bgm.trim()
+            : preset.bgm;
+        const effectiveBgmPathOverride = (typeof runtimeOverrides.bgmPath === 'string' && runtimeOverrides.bgmPath.trim())
+            ? runtimeOverrides.bgmPath.trim()
+            : '';
+        const effectiveBgmVolume = Number.isFinite(Number(runtimeOverrides.bgmVolume))
+            ? Math.min(Math.max(Number(runtimeOverrides.bgmVolume), 0), 1)
+            : preset.bgmVolume;
+        const effectiveCaptionsEnabled = (typeof runtimeOverrides.captionsEnabled === 'boolean')
+            ? runtimeOverrides.captionsEnabled
+            : preset.captionsEnabled;
+        const effectiveIntroBgVideo = (typeof runtimeOverrides.introBgVideo === 'string')
+            ? runtimeOverrides.introBgVideo.trim()
+            : preset.introBgVideo;
+
         const speakerIds = collectSpeakerIds(podcast.script);
         if (speakerIds.length) {
-            const lang = normalizeLanguage(preset.lang);
+            const lang = effectiveLanguage;
             let validIds = [];
             if (lang === 'en') {
                 const englishSpeakers = await ttsService.getEnglishSpeakers();
@@ -249,10 +323,10 @@ const runPodcastRunner = async ({
         });
 
         const hasInsertVideo = scriptItems.some((item) => item && item.insert_video);
+        const mappingPath = (typeof podcast.insertVideoMapping === 'string' && podcast.insertVideoMapping.trim())
+            ? podcast.insertVideoMapping.trim()
+            : DEFAULT_INSERT_VIDEO_MAPPING_PATH;
         if (hasInsertVideo) {
-            const mappingPath = (typeof podcast.insertVideoMapping === 'string' && podcast.insertVideoMapping.trim())
-                ? podcast.insertVideoMapping.trim()
-                : DEFAULT_INSERT_VIDEO_MAPPING_PATH;
             const resolvedMappingPath = resolveWorkPath(mappingPath, normalizedWorkDir);
             if (!resolvedMappingPath || !fs.existsSync(resolvedMappingPath)) {
                 log.warn?.(`[InsertVideoAdjust] Mapping file not found. Skipping: ${resolvedMappingPath || mappingPath}`);
@@ -291,21 +365,73 @@ const runPodcastRunner = async ({
             thumbnailPath: podcast.youtube.thumbnailPath ?? ''
         };
 
-        const bgmPath = resolveBgmPath(preset.bgm, normalizedWorkDir);
+        const bgmPath = effectiveBgmPathOverride
+            ? (resolveWorkPath(effectiveBgmPathOverride, normalizedWorkDir) || effectiveBgmPathOverride)
+            : resolveBgmPath(effectiveBgmName, normalizedWorkDir);
         if (typeof ttsService.setBgmPath === 'function') {
             ttsService.setBgmPath(bgmPath);
         }
         if (typeof ttsService.setBgmVolume === 'function') {
-            ttsService.setBgmVolume(preset.bgmVolume);
+            ttsService.setBgmVolume(effectiveBgmVolume);
         }
         if (typeof ttsService.setCaptionsEnabled === 'function') {
-            ttsService.setCaptionsEnabled(preset.captionsEnabled);
+            ttsService.setCaptionsEnabled(effectiveCaptionsEnabled);
         }
         if (typeof ttsService.setIntroBgVideo === 'function') {
-            ttsService.setIntroBgVideo(preset.introBgVideo);
+            ttsService.setIntroBgVideo(effectiveIntroBgVideo);
         }
         if (typeof ttsService.setSpeakerVideoPrefix === 'function') {
-            ttsService.setSpeakerVideoPrefix(preset.speakerVideoPrefix);
+            ttsService.setSpeakerVideoPrefix(effectiveSpeakerVideoPrefix);
+        }
+
+        try {
+            const canonicalRequest = buildCanonicalRequest({
+                request: {
+                    preset: podcast.preset,
+                    script: scriptItems,
+                    youtube: {
+                        title: podcast.youtube.title ?? '',
+                        description: podcast.youtube.description ?? '',
+                        tags: normalizeTags(podcast.youtube.tags),
+                        category: podcast.youtube.category,
+                        thumbnailPath: podcast.youtube.thumbnailPath ?? '',
+                        fixedDescription: podcast.youtube.fixedDescription ?? ''
+                    },
+                    insertVideoMapping: mappingPath,
+                    runtimeOverrides: {
+                        videoFormat: effectiveVideoFormat,
+                        playbackSpeed: effectivePlaybackSpeed,
+                        autoUpload: effectiveAutoUpload,
+                        youtubeToken: effectiveYoutubeToken,
+                        speakerVideoPrefix: effectiveSpeakerVideoPrefix,
+                        bgm: effectiveBgmName,
+                        bgmPath,
+                        bgmVolume: effectiveBgmVolume,
+                        captionsEnabled: effectiveCaptionsEnabled,
+                        introBgVideo: effectiveIntroBgVideo,
+                        backgroundText: runtimeOverrides.backgroundText || youtubeInfo.title,
+                        language: effectiveLanguage
+                    }
+                }
+            });
+            const createdSave = createSaveRecord({
+                source: 'cli',
+                request: canonicalRequest,
+                workDir: normalizedWorkDir,
+                result: { status: 'processing' }
+            });
+            const writtenSave = writeSaveRecord({
+                workDir: normalizedWorkDir,
+                record: createdSave.record,
+                fileName: createdSave.fileName
+            });
+            saveRecordRef = {
+                id: createdSave.record.id,
+                filePath: writtenSave.filePath
+            };
+            log.info?.(`[save] created: ${writtenSave.filePath}`);
+        } catch (error) {
+            log.warn?.(`[save] failed to create save record: ${error.message}`);
         }
 
         const progressHandler = (data) => {
@@ -324,13 +450,13 @@ const runPodcastRunner = async ({
 
         ttsService.on('progress', progressHandler);
 
-        const presetLang = normalizeLanguage(preset.lang);
+        const presetLang = effectiveLanguage;
         ttsService.playAudio(
             scriptItems,
             0,
-            preset.playbackSpeed,
+            effectivePlaybackSpeed,
             false,
-            { language: presetLang, videoFormat: preset.videoFormat }
+            { language: presetLang, videoFormat: effectiveVideoFormat }
         );
 
         await ttsService.pauseAudio();
@@ -339,22 +465,55 @@ const runPodcastRunner = async ({
             ttsService.setAutoGenerateVideo(true);
         }
         if (typeof ttsService.setAutoUploadToYoutube === 'function') {
-            ttsService.setAutoUploadToYoutube(preset.autoUpload);
+            ttsService.setAutoUploadToYoutube(effectiveAutoUpload);
         }
-        if (typeof ttsService.setYoutubeTokenFile === 'function' && typeof preset.youtubeToken === 'string' && preset.youtubeToken.trim()) {
-            ttsService.setYoutubeTokenFile(preset.youtubeToken.trim());
+        if (typeof ttsService.setYoutubeTokenFile === 'function' && effectiveYoutubeToken) {
+            ttsService.setYoutubeTokenFile(effectiveYoutubeToken);
         }
         if (typeof ttsService.setYoutubeInfo === 'function') {
             ttsService.setYoutubeInfo(youtubeInfo);
         }
 
         if (typeof ttsService.createBackgroundImage === 'function') {
-            await ttsService.createBackgroundImage(youtubeInfo.title);
+            const backgroundText = (typeof runtimeOverrides.backgroundText === 'string' && runtimeOverrides.backgroundText.trim())
+                ? runtimeOverrides.backgroundText
+                : youtubeInfo.title;
+            await ttsService.createBackgroundImage(backgroundText);
         }
 
-        await processingComplete;
+        const completed = await processingComplete;
+        if (saveRecordRef?.id) {
+            try {
+                updateSaveRecordResult({
+                    workDir: normalizedWorkDir,
+                    id: saveRecordRef.id,
+                    result: {
+                        status: 'completed',
+                        outputPath: completed?.data?.outputPath || '',
+                        completedAt: new Date().toISOString()
+                    }
+                });
+            } catch (error) {
+                log.warn?.(`[save] failed to update completed result: ${error.message}`);
+            }
+        }
         return 0;
     } catch (error) {
+        if (saveRecordRef?.id && normalizedWorkDir) {
+            try {
+                updateSaveRecordResult({
+                    workDir: normalizedWorkDir,
+                    id: saveRecordRef.id,
+                    result: {
+                        status: 'error',
+                        error: error?.message || String(error),
+                        failedAt: new Date().toISOString()
+                    }
+                });
+            } catch (saveError) {
+                log.warn?.(`[save] failed to update error result: ${saveError.message}`);
+            }
+        }
         log.error?.(error?.message || String(error));
         return 1;
     }
@@ -369,9 +528,10 @@ if (require.main === module) {
     const args = parseCliArgs(process.argv.slice(2));
     const workDir = args.workDir || process.env.PODCAST_CREATOR_WORKDIR;
     const podcastPath = args.podcastPath;
+    const resumePath = args.resumePath;
     const ttsService = require('../tts-service');
 
-    runPodcastRunner({ podcastPath, workDir, ttsService })
+    runPodcastRunner({ podcastPath, resumePath, workDir, ttsService })
         .then((code) => {
             process.exit(code);
         })

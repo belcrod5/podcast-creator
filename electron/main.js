@@ -11,6 +11,13 @@ const fsPromises = fs.promises; // プロミスベースの関数と同期関数
 let ttsService;
 const os = require('os');
 const { Readable } = require('stream');
+const {
+    createSaveRecord,
+    writeSaveRecord,
+    listSaveRecords,
+    loadSaveRecord,
+    updateSaveRecordResult
+} = require('../shared/podcast-save-data');
 
 // tts-service.jsと同じパス定義を追加
 const TEMP_DIR = path.join(os.tmpdir(), 'aivis-audio');
@@ -36,8 +43,12 @@ const readArgValue = (args, flag) => {
 };
 
 const CLI_PODCAST_PATH = readArgValue(process.argv, '--podcast');
+const CLI_RESUME_PATH = readArgValue(process.argv, '--resume');
 const CLI_WORK_DIR = readArgValue(process.argv, '--workdir');
-const IS_PODCAST_CLI = typeof CLI_PODCAST_PATH === 'string' && CLI_PODCAST_PATH.trim();
+const IS_PODCAST_CLI = !!(
+    (typeof CLI_PODCAST_PATH === 'string' && CLI_PODCAST_PATH.trim())
+    || (typeof CLI_RESUME_PATH === 'string' && CLI_RESUME_PATH.trim())
+);
 
 const SETTINGS_FILE_NAME = 'podcast-creator-settings.json';
 
@@ -457,6 +468,106 @@ async function setupTTSHandler(mainWindow) {
         }
     });
 
+    // セーブデータ管理
+    ipcMain.handle('podcast-save-create', async (_, payload = {}) => {
+        try {
+            const workDir = getWorkDir();
+            if (!workDir) {
+                return { success: false, error: '作業ディレクトリが未設定です' };
+            }
+            const { record, fileName } = createSaveRecord({
+                source: payload?.source || 'gui',
+                request: payload?.request,
+                workDir,
+                result: payload?.result || { status: 'processing' }
+            });
+            const written = writeSaveRecord({ workDir, record, fileName });
+            return {
+                success: true,
+                id: record.id,
+                fileName: written.fileName,
+                filePath: written.filePath,
+                record
+            };
+        } catch (error) {
+            console.error('セーブデータ作成エラー:', error);
+            return { success: false, error: error.message };
+        }
+    });
+
+    ipcMain.handle('podcast-save-list', async (_, payload = {}) => {
+        try {
+            const workDir = getWorkDir();
+            if (!workDir) {
+                return { success: false, error: '作業ディレクトリが未設定です', saves: [] };
+            }
+            const saves = listSaveRecords({
+                workDir,
+                limit: payload?.limit
+            });
+            return { success: true, saves };
+        } catch (error) {
+            console.error('セーブデータ一覧取得エラー:', error);
+            return { success: false, error: error.message, saves: [] };
+        }
+    });
+
+    ipcMain.handle('podcast-save-read', async (_, payload = {}) => {
+        try {
+            const workDir = getWorkDir();
+            if (!workDir) {
+                return { success: false, error: '作業ディレクトリが未設定です' };
+            }
+
+            const requestedRef = (typeof payload?.ref === 'string' && payload.ref.trim())
+                ? payload.ref.trim()
+                : '';
+
+            const loaded = loadSaveRecord({
+                workDir,
+                id: payload?.id,
+                fileName: payload?.fileName,
+                filePath: requestedRef
+            });
+            return {
+                success: true,
+                record: loaded.record,
+                filePath: loaded.filePath,
+                fileName: loaded.fileName
+            };
+        } catch (error) {
+            console.error('セーブデータ読込エラー:', error);
+            return { success: false, error: error.message };
+        }
+    });
+
+    ipcMain.handle('podcast-save-update-result', async (_, payload = {}) => {
+        try {
+            const workDir = getWorkDir();
+            if (!workDir) {
+                return { success: false, error: '作業ディレクトリが未設定です' };
+            }
+
+            const updated = updateSaveRecordResult({
+                workDir,
+                id: payload?.id,
+                fileName: payload?.fileName,
+                filePath: payload?.ref,
+                result: payload?.result
+            });
+
+            return {
+                success: true,
+                record: updated.record,
+                filePath: updated.filePath,
+                fileName: updated.fileName
+            };
+        } catch (error) {
+            console.error('セーブデータ更新エラー:', error);
+            return { success: false, error: error.message };
+        }
+    });
+
     ttsService.on('audioPlayed', (data) => {
         mainWindow.webContents.send('tts-audio-played', data);
     });
@@ -583,17 +694,6 @@ async function setupTTSHandler(mainWindow) {
             let resolvedPath = path.isAbsolute(normalizedTarget)
                 ? targetPath
                 : path.join(baseDir, normalizedTarget);
-
-            // 作業DIRが assets そのものの場合でも読み込めるようにフォールバック
-            if (!path.isAbsolute(normalizedTarget) && !fs.existsSync(resolvedPath)) {
-                const stripped = normalizedTarget.replace(/^assets[\\/]+/, '');
-                if (stripped !== normalizedTarget) {
-                    const alt = path.join(baseDir, stripped);
-                    if (fs.existsSync(alt)) {
-                        resolvedPath = alt;
-                    }
-                }
-            }
 
             if (!fs.existsSync(resolvedPath)) {
                 return { success: false, error: 'ファイルが存在しません' };
@@ -989,6 +1089,7 @@ app.whenReady().then(async () => {
             const { runPodcastRunner } = require('./cli/podcast-runner');
             const exitCode = await runPodcastRunner({
                 podcastPath: CLI_PODCAST_PATH,
+                resumePath: CLI_RESUME_PATH,
                 workDir: resolvedWorkDir,
                 ttsService
             });

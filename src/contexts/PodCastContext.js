@@ -62,6 +62,18 @@ exports.PodCastProvider = ({ children }) => {
         }
     });
 
+    const updateSaveResult = useCallback(async (saveId, result) => {
+        if (!saveId || !window?.electron?.podcastSaves?.updateResult) return;
+        try {
+            await window.electron.podcastSaves.updateResult({
+                id: saveId,
+                result
+            });
+        } catch (error) {
+            console.error('セーブデータの結果更新に失敗しました:', error);
+        }
+    }, []);
+
     // 自動アップロード設定は毎回ONで初期化（保存しない）
     useEffect(() => {
         setAutoUploadToYoutubeState(true);
@@ -144,6 +156,7 @@ exports.PodCastProvider = ({ children }) => {
             if (!isProcessing) return;
 
             setCurrentProgressStage(null);
+            let completedSaveId = '';
             setQueue(prevQueue => {
                 const newQueue = [...prevQueue];
                 const currentItem = newQueue[currentQueueIndex];
@@ -151,7 +164,14 @@ exports.PodCastProvider = ({ children }) => {
                 if (currentItem.status !== 'completed') {
                     currentItem.status = 'completed';
                 }
+                completedSaveId = typeof currentItem.saveId === 'string' ? currentItem.saveId : '';
                 return newQueue;
+            });
+
+            updateSaveResult(completedSaveId, {
+                status: 'completed',
+                outputPath: data?.outputPath || '',
+                completedAt: new Date().toISOString()
             });
 
             console.log('[PodCastContext] 処理完了イベントを受信しました。次のキューへ進みます。');
@@ -160,7 +180,7 @@ exports.PodCastProvider = ({ children }) => {
 
         const removeListener = tts.onProcessingComplete(onProcessingComplete);
         return () => removeListener();
-    }, [isProcessing, currentQueueIndex, processNextQueue]);
+    }, [isProcessing, currentQueueIndex, processNextQueue, updateSaveResult]);
 
     // テキストの置換処理
     const replaceText = useCallback((originalText) => {
@@ -234,6 +254,7 @@ exports.PodCastProvider = ({ children }) => {
 
     // キューの処理
     const processQueue = useCallback(async (queueItem) => {
+        let createdSaveId = '';
         try {
 
             // テキストの処理と再生開始
@@ -262,10 +283,69 @@ exports.PodCastProvider = ({ children }) => {
                 };
             });
 
+            const queueRuntimeOverrides = (queueItem && typeof queueItem.runtimeOverrides === 'object' && queueItem.runtimeOverrides !== null)
+                ? queueItem.runtimeOverrides
+                : {};
+            const effectivePlaybackSpeed = Number.isFinite(Number(queueRuntimeOverrides.playbackSpeed))
+                ? Math.min(Math.max(Number(queueRuntimeOverrides.playbackSpeed), 0.1), 2.0)
+                : playbackSpeed;
+            const effectiveAutoUpload = (typeof queueRuntimeOverrides.autoUpload === 'boolean')
+                ? queueRuntimeOverrides.autoUpload
+                : autoUploadToYoutube;
+            const effectiveYoutubeToken = (typeof queueRuntimeOverrides.youtubeToken === 'string' && queueRuntimeOverrides.youtubeToken.trim())
+                ? queueRuntimeOverrides.youtubeToken.trim()
+                : youtubeTokenFile;
+            const effectiveSpeakerVideoPrefix = (
+                typeof queueItem?.speakerVideoPrefix === 'string' && queueItem.speakerVideoPrefix !== ''
+            )
+                ? queueItem.speakerVideoPrefix
+                : (typeof queueRuntimeOverrides.speakerVideoPrefix === 'string'
+                    ? queueRuntimeOverrides.speakerVideoPrefix
+                    : '');
+
+            if (window?.electron?.podcastSaves?.create) {
+                const saveRequest = {
+                    preset: queueItem?.presetId || '',
+                    script: datasWithLanguage,
+                    youtube: {
+                        title: queueItem?.youtubeInfo?.title || '',
+                        description: queueItem?.youtubeInfo?.baseDescription ?? queueItem?.youtubeInfo?.description ?? '',
+                        tags: queueItem?.youtubeInfo?.tags ?? '',
+                        category: queueItem?.youtubeInfo?.categoryId ?? queueItem?.youtubeInfo?.category ?? '22',
+                        thumbnailPath: queueItem?.youtubeInfo?.thumbnailPath || '',
+                        fixedDescription: queueItem?.youtubeInfo?.fixedDescription || ''
+                    },
+                    insertVideoMapping: queueItem?.insertVideoMapping || '',
+                    runtimeOverrides: {
+                        ...queueRuntimeOverrides,
+                        videoFormat: queueItem?.videoFormat ?? queueRuntimeOverrides?.videoFormat ?? 'landscape',
+                        playbackSpeed: effectivePlaybackSpeed,
+                        autoUpload: effectiveAutoUpload,
+                        youtubeToken: effectiveYoutubeToken,
+                        speakerVideoPrefix: effectiveSpeakerVideoPrefix,
+                        backgroundText: queueItem?.backgroundImage?.text || queueItem?.youtubeInfo?.title || ''
+                    }
+                };
+
+                const saved = await window.electron.podcastSaves.create({
+                    source: 'gui',
+                    request: saveRequest,
+                    result: {
+                        status: 'processing'
+                    }
+                });
+                if (saved?.success && typeof saved.id === 'string' && saved.id.trim()) {
+                    createdSaveId = saved.id.trim();
+                    if (queueItem?.id) {
+                        updateQueueItem(queueItem.id, { saveId: createdSaveId });
+                    }
+                }
+            }
+
             await tts.playAudio(
                 datasWithLanguage,
                 0,  // overlapDuration
-                playbackSpeed,
+                effectivePlaybackSpeed,
                 false,
                 { language: scriptLanguage, videoFormat: queueItem?.videoFormat }
             );
@@ -273,14 +353,27 @@ exports.PodCastProvider = ({ children }) => {
             // 生成中はポーズ TODO: １つ目は再生されてしまう
             await tts.pauseAudio();
 
+            if (typeof queueRuntimeOverrides.bgmPath === 'string') {
+                await tts.setBgm(queueRuntimeOverrides.bgmPath);
+            }
+            if (Number.isFinite(Number(queueRuntimeOverrides.bgmVolume))) {
+                await tts.setBgmVolume(Math.min(Math.max(Number(queueRuntimeOverrides.bgmVolume), 0), 1));
+            }
+            if (typeof queueRuntimeOverrides.captionsEnabled === 'boolean') {
+                await tts.setCaptionsEnabled(queueRuntimeOverrides.captionsEnabled);
+            }
+            if (typeof queueRuntimeOverrides.introBgVideo === 'string') {
+                await tts.setIntroBgVideo(queueRuntimeOverrides.introBgVideo);
+            }
+
             // 自動生成とアップロードの設定を先に行う
             await tts.setAutoGenerateVideo(true);
-            await tts.setAutoUploadToYoutube(autoUploadToYoutube);
-            await tts.setYoutubeTokenFile(youtubeTokenFile);
+            await tts.setAutoUploadToYoutube(effectiveAutoUpload);
+            await tts.setYoutubeTokenFile(effectiveYoutubeToken);
             
             // スピーカー動画プレフィックスを設定
-            if (queueItem.speakerVideoPrefix !== undefined) {
-                await tts.setSpeakerVideoPrefix(queueItem.speakerVideoPrefix);
+            if (effectiveSpeakerVideoPrefix !== undefined) {
+                await tts.setSpeakerVideoPrefix(effectiveSpeakerVideoPrefix);
             }
 
             // YouTube情報の設定
@@ -301,12 +394,19 @@ exports.PodCastProvider = ({ children }) => {
             await tts.createBackgroundImage(queueItem.backgroundImage.text || queueItem.youtubeInfo.title);
 
 
-            return true;
+            return {
+                success: true,
+                saveId: createdSaveId
+            };
         } catch (error) {
             console.error('Queue processing error:', error);
-            return false;
+            return {
+                success: false,
+                saveId: createdSaveId,
+                error: error?.message || String(error)
+            };
         }
-    }, [playbackSpeed, replaceText, autoUploadToYoutube, youtubeTokenFile]);
+    }, [playbackSpeed, replaceText, autoUploadToYoutube, youtubeTokenFile, updateQueueItem]);
 
     // 次のキューの処理
     const processNextQueue = useCallback(async () => {
@@ -349,9 +449,9 @@ exports.PodCastProvider = ({ children }) => {
             
             console.log(`[PodCastContext] キュー処理開始: ${nextItem.youtubeInfo.title}`);
             setCurrentProgressStage('generating');
-            const success = await processQueue(nextItem);
+            const processResult = await processQueue(nextItem);
             
-            if (!success) {
+            if (!processResult?.success) {
                 console.log(`[PodCastContext] キュー処理に失敗しました。エラー処理を行います。`);
                 // エラー状態の更新も同様にReactの状態更新を使用
                 setQueue(prevQueue => {
@@ -361,6 +461,12 @@ exports.PodCastProvider = ({ children }) => {
                     }
                     return newQueue;
                 });
+                const failedSaveId = processResult?.saveId || nextItem?.saveId;
+                updateSaveResult(failedSaveId, {
+                    status: 'error',
+                    error: processResult?.error || 'Queue processing failed',
+                    failedAt: new Date().toISOString()
+                });
                 // エラー時に次のキューを処理（少し遅延を入れて状態更新を確実に）
                 setTimeout(() => processNextQueue(), 100);
             } else {
@@ -368,7 +474,7 @@ exports.PodCastProvider = ({ children }) => {
                 // 成功時はonProgressイベントのupload完了で次のキューに進む
             }
         }, 100);
-    }, [queue, currentQueueIndex, processQueue]);
+    }, [queue, currentQueueIndex, processQueue, updateSaveResult]);
 
     // キュー処理の開始
     const startProcessing = useCallback(async () => {
