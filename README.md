@@ -288,7 +288,8 @@ npm run dev
 ```bash
 npm run package:mac
 ```
-※ `package:mac` は `sips` / `iconutil` を使って icns を生成します（macOSのみ）
+※ `package:mac` は `arm64` を出力します。`x64` が必要な場合は `npm run package:mac:x64`、両方出力する場合は `npm run package:mac:all` を使ってください。  
+※ `package:mac:*` は `sips` / `iconutil` を使って icns を生成します（macOSのみ）
 
 ## ディレクトリ構成
 - `electron/`: Electron（main / preload / tts-service 等）

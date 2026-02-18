@@ -11,7 +11,11 @@
     "dev": "concurrently \"npm run webpack-dev\" \"npm run electron-dev\"",
     "build": "cross-env NODE_ENV=production webpack --mode production",
     "build:icns": "bash tools/make-icns.sh app-resources/app-ico.png app-resources/app-ico.icns",
-    "package:mac": "npm run build && npm run build:icns && npx --yes electron-packager . \"Podcast Creator\" --platform=darwin --out=release --overwrite --icon=app-resources/app-ico.icns --ignore='^/assets($|/)'"
+    "package:mac:prepare": "npm run build && npm run build:icns",
+    "package:mac:pack": "npx --yes electron-packager . \"Podcast Creator\" --platform=darwin --out=release --overwrite --icon=app-resources/app-ico.icns --ignore='^/assets($|/)'",
+    "package:mac": "npm run package:mac:prepare && npm run package:mac:pack -- --arch=arm64",
+    "package:mac:x64": "npm run package:mac:prepare && npm run package:mac:pack -- --arch=x64",
+    "package:mac:all": "npm run package:mac:prepare && npm run package:mac:pack -- --arch=arm64,x64"
   },
   "keywords": [],
   "author": "",
