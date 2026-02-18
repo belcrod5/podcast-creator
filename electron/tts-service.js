@@ -76,6 +76,19 @@ const resolveProjectPath = (value) => {
     return path.join(APP_ROOT, value);
 };
 
+const isPathInsideDir = (targetPath, baseDir) => {
+    if (!targetPath || !baseDir) return false;
+    try {
+        const resolvedTarget = path.resolve(targetPath);
+        const resolvedBase = path.resolve(baseDir);
+        return resolvedTarget === resolvedBase || resolvedTarget.startsWith(`${resolvedBase}${path.sep}`);
+    } catch (_) {
+        return false;
+    }
+};
+
+const isManagedTempImagePath = (filePath) => isPathInsideDir(filePath, TEMP_DIR);
+
 const getFontPath = (fontName) => {
     // 指定フォント（assets/fonts）を優先し、存在しない場合のみ system フォントへフォールバック
     if (fontName && typeof fontName === 'string') {
@@ -2763,8 +2776,8 @@ class TTSServiceInstance {
                     audioFile.player.kill();
                 }
 
-                // Clean up downloaded image
-                if (audioFile.imagePath && fs.existsSync(audioFile.imagePath)) {
+                // TEMP_DIR 配下の一時画像のみ削除する（ユーザー指定パスは削除しない）
+                if (audioFile.imagePath && isManagedTempImagePath(audioFile.imagePath) && fs.existsSync(audioFile.imagePath)) {
                     try {
                         fs.unlinkSync(audioFile.imagePath);
                         console.log(`Deleted image file: ${audioFile.imagePath}`);
@@ -3493,9 +3506,9 @@ class TTSServiceInstance {
                     try { fs.unlinkSync(videoWithBgm); } catch (e) { console.error(`一時ファイル削除エラー: ${videoWithBgm}`, e); }
                 }
 
-                // Clean up temporary images
+                // Clean up temporary images (TEMP_DIR 配下のみ)
                 for (const file of this.audioFiles) {
-                    if (file.imagePath && fs.existsSync(file.imagePath)) {
+                    if (file.imagePath && isManagedTempImagePath(file.imagePath) && fs.existsSync(file.imagePath)) {
                         try { fs.unlinkSync(file.imagePath); } catch (e) { console.error(`一時画像削除エラー: ${file.imagePath}`, e); }
                     }
                 }
@@ -3538,9 +3551,9 @@ class TTSServiceInstance {
                         try { fs.unlinkSync(clipPath); } catch (e) { console.error(`一時クリップ削除エラー: ${clipPath}`, e); }
                     }
                 }
-                // Clean up temporary images on error
+                // Clean up temporary images on error (TEMP_DIR 配下のみ)
                 for (const file of this.audioFiles) {
-                    if (file.imagePath && fs.existsSync(file.imagePath)) {
+                    if (file.imagePath && isManagedTempImagePath(file.imagePath) && fs.existsSync(file.imagePath)) {
                         try { fs.unlinkSync(file.imagePath); } catch (e) { console.error(`一時画像削除エラー: ${file.imagePath}`, e); }
                     }
                 }
