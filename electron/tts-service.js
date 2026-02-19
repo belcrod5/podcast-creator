@@ -245,6 +245,7 @@ const MAX_CLIPS_PER_CONCAT = 500;
 const VIDEO_EXTENSIONS = new Set(['.mp4', '.mov', '.m4v', '.avi', '.mkv', '.webm']);
 const ECHO_DELAY = 250;
 const YOUTUBE_AUTH_TIMEOUT_MS = 5 * 60 * 1000;
+const WAIT_MARKER_REGEX = /\{WAIT\s*:\s*([0-9]+(?:\.[0-9]+)?)\}/ig;
 
 // 字幕（drawtext）の最大横幅（画面幅に対する比率）
 const SUBTITLE_MAX_WIDTH_RATIO = 0.8;
@@ -620,6 +621,37 @@ function parseTimecodeToSeconds(value) {
         multiplier *= 60;
     }
     return total;
+}
+
+function splitTextAndWaitTokens(rawText) {
+    if (typeof rawText !== 'string' || rawText.length === 0) {
+        return [];
+    }
+
+    WAIT_MARKER_REGEX.lastIndex = 0;
+    const tokens = [];
+    let lastIndex = 0;
+    let match = null;
+
+    while ((match = WAIT_MARKER_REGEX.exec(rawText)) !== null) {
+        const markerIndex = match.index;
+        if (markerIndex > lastIndex) {
+            tokens.push({ type: 'text', value: rawText.slice(lastIndex, markerIndex) });
+        }
+
+        const waitSeconds = Number(match[1]);
+        if (Number.isFinite(waitSeconds) && waitSeconds > 0) {
+            tokens.push({ type: 'wait', duration: waitSeconds });
+        }
+
+        lastIndex = WAIT_MARKER_REGEX.lastIndex;
+    }
+
+    if (lastIndex < rawText.length) {
+        tokens.push({ type: 'text', value: rawText.slice(lastIndex) });
+    }
+
+    return tokens;
 }
 
 async function hasAudioStream(filePath) {
@@ -2272,6 +2304,23 @@ class TTSServiceInstance {
                 continue;
             }
 
+            if (file && file.isWait) {
+                if (typeof file.duration !== 'number' || !isFinite(file.duration) || file.duration < 0) {
+                    file.duration = 1;
+                }
+
+                if (typeof file.requestedStartTime === 'number' && isFinite(file.requestedStartTime) && file.requestedStartTime >= 0) {
+                    currentTime = file.requestedStartTime;
+                }
+
+                file.startTime = currentTime;
+
+                if (typeof file.duration === 'number' && isFinite(file.duration) && file.duration >= 0) {
+                    currentTime += file.duration;
+                }
+                continue;
+            }
+
             if (!file || !file.path || !fs.existsSync(file.path)) {
                 continue;
             }
@@ -2413,6 +2462,27 @@ class TTSServiceInstance {
                 continue;
             }
 
+            if (item && item.isWait) {
+                this.audioFiles.push({
+                    isWait: true,
+                    path: null,
+                    text: '',
+                    created: true,
+                    player: null,
+                    played: false,
+                    creating: false,
+                    speakerId: item.speakerId,
+                    imagePath: item.imagePath,
+                    mood: item.mood,
+                    requestedStartTime: item.requestedStartTime,
+                    startTime: null,
+                    duration: item.duration,
+                    language: normalizeLanguage(item.language),
+                    effect: item.effect
+                });
+                continue;
+            }
+
             const tempFile = this.generateTempFilePath();
             const newEntry = {
                 path: tempFile,
@@ -2443,7 +2513,7 @@ class TTSServiceInstance {
             const audioFile = this.audioFiles[i];
             try {
                 if (audioFile.created) {
-                    console.log(`Skipping generation for created item (index: ${i}, type: ${audioFile.isSection ? 'section' : (audioFile.insertVideo ? 'video' : 'unknown')})`);
+                    console.log(`Skipping generation for created item (index: ${i}, type: ${audioFile.isSection ? 'section' : (audioFile.isWait ? 'wait' : (audioFile.insertVideo ? 'video' : 'unknown'))})`);
                     continue;
                 }
 
@@ -2511,7 +2581,8 @@ class TTSServiceInstance {
             const requestedStartTime = (hasExplicitTime && Number.isFinite(parsedTime) && parsedTime >= 0)
                 ? parsedTime
                 : null;
-            let isFirstSegment = true;
+            let isFirstTimelineSegment = true;
+            let isFirstSpeechSegment = true;
             let firstSegmentRef = null;
             let calloutAssigned = false;
             // callout が本文に含まれていない場合は「ラベル」として同一data内の全セグメントで表示し続ける
@@ -2602,6 +2673,62 @@ class TTSServiceInstance {
             const parenRegex = /(\{\{.*?\}\})/g;
             const parts = text.split(parenRegex);
 
+            const pushWaitSegment = (waitSeconds) => {
+                const safeWaitSeconds = Number(waitSeconds);
+                if (!Number.isFinite(safeWaitSeconds) || safeWaitSeconds <= 0) {
+                    return;
+                }
+
+                const waitSegment = {
+                    isWait: true,
+                    duration: safeWaitSeconds,
+                    text: '',
+                    speakerId,
+                    imagePath,
+                    mood,
+                    language: entryLanguage,
+                    effect: effect
+                };
+                if (isFirstTimelineSegment && requestedStartTime !== null) {
+                    waitSegment.requestedStartTime = requestedStartTime;
+                }
+                list.push(waitSegment);
+                isFirstTimelineSegment = false;
+            };
+
+            const pushSpeechSegment = (segmentText, isEcho) => {
+                if (!segmentText) return;
+
+                const segment = {
+                    text: segmentText,
+                    speakerId,
+                    imagePath,
+                    callout: buildLabelCallout(isFirstSpeechSegment),
+                    mood,
+                    language: entryLanguage,
+                    isEcho: isEcho,
+                    se: isFirstSpeechSegment ? se : null,
+                    effect: effect
+                };
+                if (isFirstTimelineSegment && requestedStartTime !== null) {
+                    segment.requestedStartTime = requestedStartTime;
+                }
+                if (!firstSegmentRef && calloutText) {
+                    firstSegmentRef = segment;
+                }
+                if (!calloutAssigned && calloutText) {
+                    const haystack = String(segmentText || '').toLowerCase();
+                    const needle = calloutText.toLowerCase();
+                    if (needle && haystack.includes(needle)) {
+                        segment.callout = calloutText;
+                        calloutAssigned = true;
+                    }
+                }
+                list.push(segment);
+                isFirstTimelineSegment = false;
+                isFirstSpeechSegment = false;
+            };
+
             for (const part of parts) {
                 if (!part) continue;
 
@@ -2612,94 +2739,54 @@ class TTSServiceInstance {
 
                 if (!cleanText) continue;
 
-                // 位置文字ずつバッファに追加
-                let buffer = '';
-                for (let j = 0; j < cleanText.length; j++) {
-                    buffer += cleanText[j];
+                const waitAwareTokens = splitTextAndWaitTokens(cleanText);
+                for (const waitAwareToken of waitAwareTokens) {
+                    if (!waitAwareToken) continue;
 
-                    // 文末、改行、句読点、またはバッファが10文字以上で「、」がある場合に分割
-                    const punctuationRegex = /[\n。？！]/;
-                    const commaCondition = buffer.length >= 10 && cleanText[j] === '、';
+                    if (waitAwareToken.type === 'wait') {
+                        pushWaitSegment(waitAwareToken.duration);
+                        continue;
+                    }
 
-                    // 現在の文字が区切り文字かチェック
-                    if (punctuationRegex.test(cleanText[j]) || commaCondition) {
-                        // 次の文字が区切り文字なら含める（最大10文字先まで確認）
-                        let lookahead = 1;
-                        const maxLookahead = Math.min(10, cleanText.length - j - 1);
-                        const closingBrackets = /[）」』】\]\}>]/;
+                    const chunkText = (typeof waitAwareToken.value === 'string') ? waitAwareToken.value : '';
+                    if (!chunkText) continue;
 
-                        while (lookahead <= maxLookahead &&
-                            (punctuationRegex.test(cleanText[j + lookahead]) ||
-                                cleanText[j + lookahead] === '、' ||
-                                closingBrackets.test(cleanText[j + lookahead]))) {
-                            buffer += cleanText[j + lookahead];
-                            lookahead++;
-                        }
+                    // 位置文字ずつバッファに追加
+                    let buffer = '';
+                    for (let j = 0; j < chunkText.length; j++) {
+                        buffer += chunkText[j];
 
-                        // 先読みした分だけインデックスを進める
-                        j += (lookahead - 1);
+                        // 文末、改行、句読点、またはバッファが10文字以上で「、」がある場合に分割
+                        const punctuationRegex = /[\n。？！]/;
+                        const commaCondition = buffer.length >= 10 && chunkText[j] === '、';
 
-                        // imagePathを含めてlistに追加（句読点や改行記号を含めて追加）
-                        const segment = {
-                            text: buffer,
-                            speakerId,
-                            imagePath,
-                            callout: buildLabelCallout(isFirstSegment),
-                            mood,
-                            language: entryLanguage,
-                            isEcho: isEcho,
-                            se: isFirstSegment ? se : null,
-                            effect: effect
-                        };
-                        if (isFirstSegment && requestedStartTime !== null) {
-                            segment.requestedStartTime = requestedStartTime;
-                        }
-                        if (!firstSegmentRef && calloutText) {
-                            firstSegmentRef = segment;
-                        }
-                        if (!calloutAssigned && calloutText) {
-                            const haystack = String(buffer || '').toLowerCase();
-                            const needle = calloutText.toLowerCase();
-                            if (needle && haystack.includes(needle)) {
-                                segment.callout = calloutText;
-                                calloutAssigned = true;
+                        // 現在の文字が区切り文字かチェック
+                        if (punctuationRegex.test(chunkText[j]) || commaCondition) {
+                            // 次の文字が区切り文字なら含める（最大10文字先まで確認）
+                            let lookahead = 1;
+                            const maxLookahead = Math.min(10, chunkText.length - j - 1);
+                            const closingBrackets = /[）」』】\]\}>]/;
+
+                            while (lookahead <= maxLookahead &&
+                                (punctuationRegex.test(chunkText[j + lookahead]) ||
+                                    chunkText[j + lookahead] === '、' ||
+                                    closingBrackets.test(chunkText[j + lookahead]))) {
+                                buffer += chunkText[j + lookahead];
+                                lookahead++;
                             }
-                        }
-                        list.push(segment);
-                        isFirstSegment = false;
-                        buffer = '';
-                    }
-                }
 
-                // 残りのテキストがある場合も追加
-                if (buffer.length > 0) {
-                    const segment = {
-                        text: buffer,
-                        speakerId,
-                        imagePath,
-                        callout: buildLabelCallout(isFirstSegment),
-                        mood,
-                        language: entryLanguage,
-                        isEcho: isEcho,
-                        se: isFirstSegment ? se : null,
-                        effect: effect
-                    };
-                    if (isFirstSegment && requestedStartTime !== null) {
-                        segment.requestedStartTime = requestedStartTime;
-                    }
-                    if (!firstSegmentRef && calloutText) {
-                        firstSegmentRef = segment;
-                    }
-                    if (!calloutAssigned && calloutText) {
-                        const haystack = String(buffer || '').toLowerCase();
-                        const needle = calloutText.toLowerCase();
-                        if (needle && haystack.includes(needle)) {
-                            segment.callout = calloutText;
-                            calloutAssigned = true;
+                            // 先読みした分だけインデックスを進める
+                            j += (lookahead - 1);
+
+                            pushSpeechSegment(buffer, isEcho);
+                            buffer = '';
                         }
                     }
-                    list.push(segment);
-                    isFirstSegment = false; // Ensure subsequent parts are not first
+
+                    // 残りのテキストがある場合も追加
+                    if (buffer.length > 0) {
+                        pushSpeechSegment(buffer, isEcho);
+                    }
                 }
             }
 
@@ -2730,7 +2817,7 @@ class TTSServiceInstance {
                 continue;
             }
 
-            if (this.currentPlayingAudioFile && this.currentPlayingAudioFile.isSection) {
+            if (this.currentPlayingAudioFile && (this.currentPlayingAudioFile.isSection || this.currentPlayingAudioFile.isWait)) {
                 const duration = this.currentPlayingAudioFile.duration || 1;
                 await new Promise(resolve => setTimeout(resolve, duration * 1000));
                 continue;
@@ -2939,7 +3026,7 @@ class TTSServiceInstance {
         const audioFilesWithDuration = [];
         for (const file of this.audioFiles) {
             if (!file) continue;
-            if (!file.isSection && (!file.path || !fs.existsSync(file.path))) {
+            if (!file.isSection && !file.isWait && (!file.path || !fs.existsSync(file.path))) {
                 continue;
             }
 
@@ -2955,7 +3042,7 @@ class TTSServiceInstance {
                 ? file.duration
                 : null;
             if (duration === null) {
-                if (file.isSection) {
+                if (file.isSection || file.isWait) {
                     duration = 1;
                 } else {
                     duration = await this.getAudioDuration(file.path);
@@ -2998,6 +3085,16 @@ class TTSServiceInstance {
                     duration: file.duration || 1,
                     startTime,
                     se: file.se
+                });
+                continue;
+            }
+
+            if (file.isWait) {
+                audioFilesWithDuration.push({
+                    ...file,
+                    text: '',
+                    duration: file.duration || 1,
+                    startTime
                 });
                 continue;
             }
@@ -3125,6 +3222,17 @@ class TTSServiceInstance {
                 let currentZoom = 1.0;
                 let lastSpeakerIdForZoom = null;
                 let lastWasZoomClip = false;
+                const isVideoSourcePath = (targetPath) => {
+                    if (typeof targetPath !== 'string' || !targetPath) return false;
+                    return VIDEO_EXTENSIONS.has(path.extname(targetPath).toLowerCase());
+                };
+                let lastVisualState = {
+                    videoPath: null,
+                    imagePath: null,
+                    hasPip: false,
+                    effect: null,
+                    language: LANGUAGE_CODES.JAPANESE
+                };
 
                 // 各音声ファイルごとに動画クリップを生成
                 for (let i = 0; i < audioFilesWithDuration.length; i++) {
@@ -3159,6 +3267,25 @@ class TTSServiceInstance {
                         videoClips.push(insertClipResult.outputPath);
                         backgroundTimeOffset += insertClipResult.duration;
                         timelineCursor = Math.max(timelineCursor, file.startTime) + insertClipResult.duration;
+                        currentImagePath = null;
+                        if (file.path && fs.existsSync(file.path)) {
+                            lastGapBackgroundPath = file.path;
+                            lastVisualState = {
+                                videoPath: file.path,
+                                imagePath: null,
+                                hasPip: false,
+                                effect: file.effect || null,
+                                language: normalizeLanguage(file.language)
+                            };
+                        } else {
+                            lastVisualState = {
+                                videoPath: null,
+                                imagePath: null,
+                                hasPip: false,
+                                effect: null,
+                                language: normalizeLanguage(file.language)
+                            };
+                        }
                         continue;
                     }
 
@@ -3171,18 +3298,16 @@ class TTSServiceInstance {
 
                         backgroundTimeOffset += duration;
                         timelineCursor = Math.max(timelineCursor, file.startTime) + duration;
+                        currentImagePath = null;
+                        lastVisualState = {
+                            videoPath: null,
+                            imagePath: null,
+                            hasPip: false,
+                            effect: null,
+                            language: normalizeLanguage(file.language)
+                        };
                         continue;
                     }
-
-                    const originalDuration = file.duration;
-                    const speed = (typeof this.playbackSpeed === 'number' && this.playbackSpeed > 0)
-                        ? this.playbackSpeed
-                        : 1.0;
-                    const adjustedDuration = originalDuration / speed;
-
-                    console.log(`[DEBUG][詳細] 音声ファイル${i + 1}: ${file.path}`);
-                    console.log(`[DEBUG][詳細] 元の長さ: ${originalDuration}秒, 再生速度: ${speed}x, 調整後長さ: ${adjustedDuration}秒`);
-                    console.log(`[DEBUG][詳細] 背景動画開始位置: ${backgroundTimeOffset}秒`);
 
                     const clipStartTime = (typeof file.startTime === 'number' && isFinite(file.startTime) && file.startTime >= 0)
                         ? file.startTime
@@ -3210,6 +3335,143 @@ class TTSServiceInstance {
                     } else {
                         timelineCursor = Math.max(timelineCursor, clipStartTime);
                     }
+
+                    if (file.isWait) {
+                        const waitDuration = (typeof file.duration === 'number' && isFinite(file.duration) && file.duration > 0)
+                            ? file.duration
+                            : 1;
+                        const waitClipPath = path.join(TEMP_DIR, `clip_wait_${i}_${Date.now()}.mkv`);
+
+                        let waitVideoPath = (lastVisualState.videoPath && fs.existsSync(lastVisualState.videoPath))
+                            ? lastVisualState.videoPath
+                            : null;
+                        let waitImagePath = (lastVisualState.imagePath && fs.existsSync(lastVisualState.imagePath))
+                            ? lastVisualState.imagePath
+                            : null;
+
+                        if (!waitVideoPath && file.speakerId) {
+                            const candidateSpeakerVideo = speakerVideos[`${file.speakerId}__${file.mood || ''}`];
+                            if (candidateSpeakerVideo && fs.existsSync(candidateSpeakerVideo)) {
+                                waitVideoPath = candidateSpeakerVideo;
+                            }
+                        }
+
+                        if (!waitImagePath && file.imagePath && fs.existsSync(file.imagePath)) {
+                            waitImagePath = file.imagePath;
+                        }
+
+                        if (!waitVideoPath && waitImagePath) {
+                            waitVideoPath = waitImagePath;
+                            waitImagePath = null;
+                        }
+
+                        if (!waitVideoPath && gapBackgroundPath && fs.existsSync(gapBackgroundPath)) {
+                            waitVideoPath = gapBackgroundPath;
+                        }
+
+                        const hasPipDuringWait = Boolean(
+                            waitImagePath
+                            && waitVideoPath
+                            && fs.existsSync(waitImagePath)
+                            && isVideoSourcePath(waitVideoPath)
+                        );
+                        const isMainBackgroundVideoDuringWait = Boolean(
+                            hasPipDuringWait
+                            && waitImagePath
+                            && isVideoSourcePath(waitImagePath)
+                        );
+                        const waitLanguage = normalizeLanguage(file.language || lastVisualState.language);
+                        const waitEffect = file.effect || lastVisualState.effect || null;
+                        const waitAudioPath = path.join(TEMP_DIR, `audio-wait-${i}-${Date.now()}.wav`);
+
+                        let createdWaitClipPath = waitClipPath;
+                        let effectiveWaitDuration = waitDuration;
+                        try {
+                            await this._createSilenceAudioFile(waitDuration, waitAudioPath);
+                            const waitClipResult = await this._createVideoClipWithText(
+                                waitVideoPath,
+                                '',
+                                waitAudioPath,
+                                hasPipDuringWait ? waitImagePath : null,
+                                waitClipPath,
+                                waitDuration,
+                                backgroundTimeOffset,
+                                true,
+                                true,
+                                false,
+                                null,
+                                waitEffect,
+                                false,
+                                1.0,
+                                waitLanguage,
+                                null,
+                                {
+                                    exactDuration: true,
+                                    pauseMainVideo: !hasPipDuringWait,
+                                    pausePipVideo: hasPipDuringWait,
+                                    pauseMainOffset: backgroundTimeOffset,
+                                    pausePipOffset: 0
+                                }
+                            );
+
+                            if (waitClipResult && waitClipResult.outputPath) {
+                                createdWaitClipPath = waitClipResult.outputPath;
+                            }
+                            if (waitClipResult && typeof waitClipResult.duration === 'number' && isFinite(waitClipResult.duration) && waitClipResult.duration > 0) {
+                                effectiveWaitDuration = waitClipResult.duration;
+                            }
+                        } finally {
+                            try {
+                                if (fs.existsSync(waitAudioPath)) {
+                                    fs.unlinkSync(waitAudioPath);
+                                }
+                            } catch (_) {
+                                // ignore cleanup errors
+                            }
+                        }
+
+                        clipTimer.end({
+                            clipIndex: i,
+                            originalDuration: waitDuration,
+                            adjustedDuration: waitDuration,
+                            effectiveDuration: effectiveWaitDuration,
+                            clipPath: createdWaitClipPath,
+                            backgroundTimeOffset,
+                            clipStartTime,
+                            waitPauseTarget: hasPipDuringWait ? 'pip' : 'main'
+                        });
+
+                        videoClips.push(createdWaitClipPath);
+                        timelineCursor = Math.max(timelineCursor, clipStartTime) + effectiveWaitDuration;
+                        if (isMainBackgroundVideoDuringWait) {
+                            backgroundTimeOffset += effectiveWaitDuration;
+                        }
+
+                        currentImagePath = hasPipDuringWait ? waitImagePath : null;
+                        lastGapBackgroundPath = (hasPipDuringWait && waitImagePath && fs.existsSync(waitImagePath))
+                            ? waitImagePath
+                            : (waitVideoPath && fs.existsSync(waitVideoPath))
+                                ? waitVideoPath
+                                : gapBackgroundPath;
+                        lastVisualState = {
+                            videoPath: waitVideoPath,
+                            imagePath: hasPipDuringWait ? waitImagePath : null,
+                            hasPip: hasPipDuringWait,
+                            effect: waitEffect,
+                            language: waitLanguage
+                        };
+                        continue;
+                    }
+
+                    const originalDuration = file.duration;
+                    const speed = (typeof this.playbackSpeed === 'number' && this.playbackSpeed > 0)
+                        ? this.playbackSpeed
+                        : 1.0;
+                    const adjustedDuration = originalDuration / speed;
+
+                    console.log(`[DEBUG][詳細] 音声ファイル${i + 1}: ${file.path}`);
+                    console.log(`[DEBUG][詳細] 元の長さ: ${originalDuration}秒, 再生速度: ${speed}x, 調整後長さ: ${adjustedDuration}秒`);
+                    console.log(`[DEBUG][詳細] 背景動画開始位置: ${backgroundTimeOffset}秒`);
 
                     let videoPath = speakerVideos[`${file.speakerId}__${file.mood || ''}`];
                     let useZoom = false;
@@ -3419,6 +3681,20 @@ class TTSServiceInstance {
                         lastWasZoomClip = false;
                     }
 
+                    const stateVideoPath = (videoPath && fs.existsSync(videoPath))
+                        ? videoPath
+                        : null;
+                    const stateImagePath = (imagePath && fs.existsSync(imagePath))
+                        ? imagePath
+                        : null;
+                    lastVisualState = {
+                        videoPath: stateVideoPath,
+                        imagePath: stateImagePath,
+                        hasPip: Boolean(stateVideoPath && stateImagePath && isVideoSourcePath(stateVideoPath)),
+                        effect: file.effect || null,
+                        language: normalizeLanguage(file.language)
+                    };
+
                     clipTimer.end({
                         clipIndex: i,
                         originalDuration,
@@ -3620,6 +3896,76 @@ class TTSServiceInstance {
         });
     }
 
+    async _createSilenceAudioFile(duration, outputPath) {
+        const safeDuration = Number(duration);
+        if (!isFinite(safeDuration) || safeDuration <= 0) {
+            throw new Error(`Invalid silence duration: ${duration}`);
+        }
+
+        const targetPath = (typeof outputPath === 'string' && outputPath.trim())
+            ? outputPath
+            : path.join(TEMP_DIR, `silence_${Date.now()}_${Math.random().toString(16).slice(2)}.wav`);
+
+        await new Promise((resolve, reject) => {
+            ffmpeg()
+                .input('anullsrc=channel_layout=stereo:sample_rate=44100')
+                .inputOptions(['-f', 'lavfi'])
+                .outputOptions([
+                    '-t', `${safeDuration}`,
+                    '-c:a', 'pcm_s16le',
+                    '-ar', '44100',
+                    '-ac', '2'
+                ])
+                .save(targetPath)
+                .on('end', resolve)
+                .on('error', reject);
+        });
+
+        return targetPath;
+    }
+
+    async _captureVideoFrameImage(videoPath, offsetSeconds = 0) {
+        if (!videoPath || !fs.existsSync(videoPath)) {
+            return null;
+        }
+
+        const safeOffset = (typeof offsetSeconds === 'number' && isFinite(offsetSeconds) && offsetSeconds > 0)
+            ? offsetSeconds
+            : 0;
+        const framePath = path.join(
+            TEMP_DIR,
+            `wait_frame_${Date.now()}_${Math.random().toString(16).slice(2)}.png`
+        );
+
+        try {
+            await new Promise((resolve, reject) => {
+                let command = ffmpeg(videoPath);
+                if (safeOffset > 0) {
+                    command = command.inputOptions(['-ss', `${safeOffset}`]);
+                }
+                command
+                    .outputOptions(['-frames:v', '1', '-q:v', '2'])
+                    .output(framePath)
+                    .on('end', resolve)
+                    .on('error', reject)
+                    .run();
+            });
+
+            if (fs.existsSync(framePath)) {
+                return framePath;
+            }
+        } catch (error) {
+            console.warn(`動画フレームの静止画化に失敗しました: ${videoPath}`, error?.message || error);
+        }
+
+        try {
+            if (fs.existsSync(framePath)) fs.unlinkSync(framePath);
+        } catch (_) {
+            // ignore cleanup errors
+        }
+        return null;
+    }
+
     async _createGapClip(duration, outputPath, options = {}) {
         const safeDuration = Number(duration);
         if (!isFinite(safeDuration) || safeDuration <= 0) {
@@ -3715,7 +4061,7 @@ class TTSServiceInstance {
      * @param {number} backgroundOffset - 背景動画の開始位置（秒）
      * @returns {Promise<{ outputPath: string, duration: number }>} 出力情報
      */
-    async _createVideoClipWithText(videoPath, text, audioPath, imagePath, outputPath, duration, backgroundOffset = 0, loopVideo = true, loopImage = true, padAudioTailOneSec = false, seFileName = null, effect = null, useZoom = false, initialZoom = 1.0, language = LANGUAGE_CODES.JAPANESE, callout = null) {
+    async _createVideoClipWithText(videoPath, text, audioPath, imagePath, outputPath, duration, backgroundOffset = 0, loopVideo = true, loopImage = true, padAudioTailOneSec = false, seFileName = null, effect = null, useZoom = false, initialZoom = 1.0, language = LANGUAGE_CODES.JAPANESE, callout = null, pauseOptions = null) {
         const timer = performanceLogger.startTimer('createVideoClipWithText');
         performanceLogger.addLog('createVideoClipWithText_start', {
             videoPath,
@@ -3754,6 +4100,10 @@ class TTSServiceInstance {
         const requestedDuration = (typeof duration === 'number' && !isNaN(duration) && duration > 0)
             ? duration
             : null;
+        const normalizedPauseOptions = (pauseOptions && typeof pauseOptions === 'object')
+            ? pauseOptions
+            : {};
+        const exactDuration = normalizedPauseOptions.exactDuration === true;
 
         // SVG形式のimagePath検出時は変換処理を実行
         if (imagePath && imagePath.toLowerCase().endsWith('.svg')) {
@@ -3796,7 +4146,7 @@ class TTSServiceInstance {
             safeDuration = actualAudioDuration || 1.0;
         }
 
-        const EPSILON = 0.05; // 50msの余裕を持たせてクリップ末尾の切れ込みを防止
+        const EPSILON = exactDuration ? 0 : 0.05; // WAITなど正確秒数が必要な場合は余白を付けない
         safeDuration = Math.max(0.05, safeDuration + EPSILON);
         duration = safeDuration;
 
@@ -3815,6 +4165,24 @@ class TTSServiceInstance {
             videoPath.toLowerCase().endsWith('.mov') ||
             videoPath.toLowerCase().endsWith('.avi')
         );
+        const pauseMainVideo = normalizedPauseOptions.pauseMainVideo === true;
+        const pausePipVideo = normalizedPauseOptions.pausePipVideo === true;
+        const pauseMainOffset = (typeof normalizedPauseOptions.pauseMainOffset === 'number' && isFinite(normalizedPauseOptions.pauseMainOffset) && normalizedPauseOptions.pauseMainOffset >= 0)
+            ? normalizedPauseOptions.pauseMainOffset
+            : backgroundOffset;
+        const pausePipOffset = (typeof normalizedPauseOptions.pausePipOffset === 'number' && isFinite(normalizedPauseOptions.pausePipOffset) && normalizedPauseOptions.pausePipOffset >= 0)
+            ? normalizedPauseOptions.pausePipOffset
+            : 0;
+
+        let pauseMainFramePath = null;
+        let pausePipFramePath = null;
+        if (isVideo && pauseMainVideo) {
+            pauseMainFramePath = await this._captureVideoFrameImage(videoPath, pauseMainOffset);
+        }
+        if (isVideo && pausePipVideo) {
+            pausePipFramePath = await this._captureVideoFrameImage(videoPath, pausePipOffset);
+        }
+        const tempPauseFramePaths = [pauseMainFramePath, pausePipFramePath].filter(Boolean);
 
         if (isVideo && backgroundOffset > 0) {
             try {
@@ -3879,12 +4247,26 @@ class TTSServiceInstance {
             let imageInputLabel = '';
             let pipVideoInputLabel = '';
             let mapOptions = [];
+            const cleanupPauseFrames = () => {
+                for (const pauseFramePath of tempPauseFramePaths) {
+                    try {
+                        if (pauseFramePath && fs.existsSync(pauseFramePath)) {
+                            fs.unlinkSync(pauseFramePath);
+                        }
+                    } catch (_) {
+                        // ignore cleanup errors
+                    }
+                }
+            };
+
+            const effectiveMainSourcePath = pauseMainFramePath || videoPath;
+            const effectiveMainIsVideo = Boolean(isVideo && !pauseMainFramePath);
 
             // Input 0: Main Video/Background (背景なしの場合は追加しない)
-            if (videoPath) {
-                if (isVideo) {
+            if (effectiveMainSourcePath) {
+                if (effectiveMainIsVideo) {
                     // ビデオ入力の場合はビデオ属性として使用
-                    console.log(`[DEBUG][詳細] 動画を背景として使用: ${videoPath}, オフセット: ${backgroundOffset}秒`);
+                    console.log(`[DEBUG][詳細] 動画を背景として使用: ${effectiveMainSourcePath}, オフセット: ${backgroundOffset}秒`);
 
                     // ループ設定がある場合は、stream_loopオプションを追加
                     let inputOpts = ['-t', `${safeDuration + 1}`]; // 少し余裕を持たせる
@@ -3901,7 +4283,7 @@ class TTSServiceInstance {
                         console.log(`[DEBUG][詳細] 動画ループが有効: -stream_loop -1 (${loopVideo ? 'ユーザー指定' : 'オフセット補正のため自動有効化'})`);
                     }
 
-                    command.input(videoPath)
+                    command.input(effectiveMainSourcePath)
                         .inputOptions(inputOpts);
 
                     videoInputLabel = `[${inputIndex}:v]`;
@@ -3931,9 +4313,9 @@ class TTSServiceInstance {
                     */
                 } else {
                     // 静止画の場合
-                    console.log(`[DEBUG][詳細] 画像を背景として使用: ${videoPath}`);
+                    console.log(`[DEBUG][詳細] 画像を背景として使用: ${effectiveMainSourcePath}`);
                     console.log(`[DEBUG][詳細] 入力オプション: -loop 1, -t ${safeDuration}`);
-                    command.input(videoPath)
+                    command.input(effectiveMainSourcePath)
                         .inputOptions(['-loop', '1']) // 画像をループさせる
                         .inputOptions(['-t', `${safeDuration}`]); // 必要な長さに制限
 
@@ -4020,24 +4402,33 @@ class TTSServiceInstance {
 
             // Input 3: 追加でPiP用に同じ背景動画をもう一度入力（オフセットなし）
             if (isVideo && hasValidImage) {
-                // オフセットを適用せず、別入力として追加
-                console.log(`[DEBUG] PiPには別の入力を使用します: ${videoPath} (オフセットなし)`);
+                if (pausePipFramePath && fs.existsSync(pausePipFramePath)) {
+                    console.log(`[DEBUG] PiP動画を静止画化して停止: ${pausePipFramePath}`);
+                    command.input(pausePipFramePath)
+                        .inputOptions(['-loop', '1'])
+                        .inputOptions(['-t', `${safeDuration}`]);
+                    pipVideoInputLabel = `[${inputIndex}:v]`;
+                    inputIndex++;
+                } else {
+                    // オフセットを適用せず、別入力として追加
+                    console.log(`[DEBUG] PiPには別の入力を使用します: ${videoPath} (オフセットなし)`);
 
-                // ループ設定がある場合は、stream_loopオプションを追加
-                let inputOpts = [];
-                if (loopImage) {
-                    inputOpts.push('-stream_loop', '-1'); // -1でエンドレスループ
-                    console.log(`[DEBUG][詳細] PiP動画ループが有効: -stream_loop -1`);
+                    // ループ設定がある場合は、stream_loopオプションを追加
+                    let inputOpts = [];
+                    if (loopImage) {
+                        inputOpts.push('-stream_loop', '-1'); // -1でエンドレスループ
+                        console.log(`[DEBUG][詳細] PiP動画ループが有効: -stream_loop -1`);
+                    }
+
+                    command.input(videoPath)
+                        .inputOptions(inputOpts);
+
+                    pipVideoInputLabel = `[${inputIndex}:v]`;
+                    inputIndex++;
+
+                    // PiP用の動画にはオフセットを適用しない（常に0秒から開始）
+                    console.log(`[DEBUG][詳細] PiP用の動画は0秒から開始します`);
                 }
-
-                command.input(videoPath)
-                    .inputOptions(inputOpts);
-
-                pipVideoInputLabel = `[${inputIndex}:v]`;
-                inputIndex++;
-
-                // PiP用の動画にはオフセットを適用しない（常に0秒から開始）
-                console.log(`[DEBUG][詳細] PiP用の動画は0秒から開始します`);
             }
 
             // Input 4: SE (if present)
@@ -4546,6 +4937,7 @@ class TTSServiceInstance {
                             console.warn(`一時ASSファイルの削除に失敗: ${calloutAssPath}`, err);
                         }
                     }
+                    cleanupPauseFrames();
 
                     timer.end({
                         outputPath,
@@ -4586,6 +4978,7 @@ class TTSServiceInstance {
                             console.warn(`エラー後の一時ファイル削除に失敗: ${calloutAssPath}`, cleanupErr);
                         }
                     }
+                    cleanupPauseFrames();
 
                     reject(err);
                 })
