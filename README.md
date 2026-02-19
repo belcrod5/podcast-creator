@@ -156,6 +156,9 @@ node electron/cli/podcast-runner.js \
 - `youtube.thumbnailPath` は **任意**（未指定でもOK）。
 - `preset` は `data/podcastcreator-preset.json` の **ID** を指定。
 - `script` の話者IDは `preset.lang` に応じて検証されます（無効IDはエラー）。
+- `script[].text` には待機記法 `{WAIT:n}` を書けます（`n` 秒の無音待機を挿入）。
+  - 例: `おはようございます{WAIT:3}今日もいい天気です`
+  - WAIT中は映像を停止します。PiPがある場合はPiP側を停止、PiPがない場合はメイン背景動画を停止します。
 - `fixedDescription` は `preset.fixedDescription` → `youtube.fixedDescription` の順で `youtube.description` に追記。
 - `insertVideoMapping` は任意。未指定時は `videos/output.mp4.json` を探し、無ければ警告のみでスキップ。
 - CLIは `processing-complete` まで待機し、成功時は exit code 0 / 失敗時は 1。
@@ -221,6 +224,7 @@ node electron/cli/podcast-runner.js \
     {"id": "532977856", "text": "よろしくお願いいたします！"},
     {"id": "1937616896", "text": "コールアウト機能テスト ", "callout": "コールアウトテスト"},
     {"id": "532977856", "text": "心の声テスト{{心の声です}} "},
+    {"id": "1937616896", "text": "おはようございます{WAIT:3}今日もいい天気です。"},
     {"id": "1937616896", "text": "さようなら！"}
   ],
   "youtube": {
@@ -234,6 +238,8 @@ node electron/cli/podcast-runner.js \
 
 - id は音声合成モデルの idです。idの調べ方は Podcast Creator「話者一覧」から確認できます
 - 動画挿入は {"insert_video": "{ファイルパス}", "startTime": "01:00", "endTime": "02:00"}
+- `{WAIT:n}` を `text` 内に入れると `n` 秒の無音を挿入できます（例: `{WAIT:3}`）。
+  - WAIT中は、PiPがある場合はPiP動画を停止、PiPがない場合はメイン背景動画を停止します。
 - 会話の途中に画像や動画の背景を追加するのはJSONペーストした後の会話の横にある「ペースト」に画像URLを貼り付けるか、ファイルをドラッグ＆ドロップします
 
 
