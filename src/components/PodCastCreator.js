@@ -260,23 +260,31 @@ const LocalImagePreview = ({ filePath }) => {
 };
 
 // キューアイテムのフォーム初期値
-const initialFormState = {
-    script: {
-        text: '',
-        speakerId: '',
-        language: 'ja'
-    },
-    youtubeInfo: {
-        title: '',
-        description: '',
-        tags: '',
-        categoryId: '22',
-        thumbnailPath: ''
-    },
-    backgroundImage: {
-        text: ''
-    },
-    speakerVideoPrefix: localStorage.getItem('speaker-video-prefix') || ''
+const createInitialFormState = () => {
+    let savedSpeakerVideoPrefix = '';
+    try {
+        savedSpeakerVideoPrefix = localStorage.getItem('speaker-video-prefix') || '';
+    } catch (_) {
+        savedSpeakerVideoPrefix = '';
+    }
+    return {
+        script: {
+            text: '',
+            speakerId: '',
+            language: 'ja'
+        },
+        youtubeInfo: {
+            title: '',
+            description: '',
+            tags: '',
+            categoryId: '22',
+            thumbnailPath: ''
+        },
+        backgroundImage: {
+            text: ''
+        },
+        speakerVideoPrefix: savedSpeakerVideoPrefix
+    };
 };
 
 // 許可する画像形式の定数定義
@@ -411,7 +419,7 @@ const PodCastCreator = () => {
 
     const [speakers, setSpeakers] = useState([]);
     const [englishSpeakers, setEnglishSpeakers] = useState([]);
-    const [formData, setFormData] = useState(initialFormState);
+    const [formData, setFormData] = useState(() => createInitialFormState());
 
     // YouTube認証関連の状態
     const [isYoutubeAuthChecking, setIsYoutubeAuthChecking] = useState(false);
@@ -567,19 +575,14 @@ const PodCastCreator = () => {
         }
     }, []);
 
-    // スピーカー動画プレフィックス
-    const [speakerVideoPrefix, setSpeakerVideoPrefix] = useState(
-        localStorage.getItem('speaker-video-prefix') || ''
-    );
-
     // プレフィックス変更時に永続化とバックエンドへ通知
     useEffect(() => {
         try {
-            localStorage.setItem('speaker-video-prefix', speakerVideoPrefix);
+            localStorage.setItem('speaker-video-prefix', formData.speakerVideoPrefix || '');
         } catch (_) {
             /* ignore */
         }
-    }, [speakerVideoPrefix]);
+    }, [formData.speakerVideoPrefix]);
 
     useEffect(() => {
         try {
@@ -719,6 +722,13 @@ const PodCastCreator = () => {
 
             if (typeof pendingPreset.fixedDescription === 'string') {
                 setFixedYoutubeDescription(pendingPreset.fixedDescription);
+            }
+
+            if (typeof pendingPreset.speakerVideoPrefix === 'string') {
+                setFormData((prev) => ({
+                    ...prev,
+                    speakerVideoPrefix: pendingPreset.speakerVideoPrefix
+                }));
             }
 
             if (typeof pendingPreset.lang === 'string' && pendingPreset.lang.trim()) {
@@ -1359,7 +1369,10 @@ const PodCastCreator = () => {
             }
 
             if (typeof runtimeOverrides.speakerVideoPrefix === 'string') {
-                setSpeakerVideoPrefix(runtimeOverrides.speakerVideoPrefix);
+                setFormData((prev) => ({
+                    ...prev,
+                    speakerVideoPrefix: runtimeOverrides.speakerVideoPrefix
+                }));
             }
 
             if (Number.isFinite(Number(runtimeOverrides.bgmVolume))) {
@@ -1734,7 +1747,7 @@ const PodCastCreator = () => {
                 playbackSpeed,
                 autoUpload: autoUploadToYoutube,
                 youtubeToken: selectedYoutubeToken || youtubeTokenFile || '',
-                speakerVideoPrefix,
+                speakerVideoPrefix: formData.speakerVideoPrefix,
                 bgm: selectedBgm || '',
                 bgmPath: selectedBgmPath,
                 bgmVolume,
@@ -1748,7 +1761,7 @@ const PodCastCreator = () => {
         addToQueue(queuePayload);
 
         // フォームをリセット
-        setFormData(initialFormState);
+        setFormData(createInitialFormState());
         setScriptItems([]);
         setYoutubeTokenError(false);
         setYoutubeTokenDialogOpen(false);
@@ -2667,7 +2680,6 @@ const PodCastCreator = () => {
                             onChange={(e) => {
                                 const newValue = e.target.value;
                                 setFormData(prev => ({ ...prev, speakerVideoPrefix: newValue }));
-                                localStorage.setItem('speaker-video-prefix', newValue);
                             }}
                             helperText="スピーカー動画ファイル名の末尾に付与されます (例: _v)"
                         />
