@@ -2,7 +2,8 @@ const fs = require('fs');
 const path = require('path');
 const {
     normalizeScriptItems,
-    adjustInsertVideoTimingsCore
+    adjustInsertVideoTimingsCore,
+    buildInsertVideoMappingPlan
 } = require('../../shared/podcast-script');
 const {
     buildCanonicalRequest,
@@ -323,34 +324,115 @@ const runPodcastRunner = async ({
         });
 
         const hasInsertVideo = scriptItems.some((item) => item && item.insert_video);
-        const mappingPath = (typeof podcast.insertVideoMapping === 'string' && podcast.insertVideoMapping.trim())
+        const topLevelMappingPath = (typeof podcast.insertVideoMapping === 'string' && podcast.insertVideoMapping.trim())
             ? podcast.insertVideoMapping.trim()
             : DEFAULT_INSERT_VIDEO_MAPPING_PATH;
         if (hasInsertVideo) {
-            const resolvedMappingPath = resolveWorkPath(mappingPath, normalizedWorkDir);
-            if (!resolvedMappingPath || !fs.existsSync(resolvedMappingPath)) {
-                log.warn?.(`[InsertVideoAdjust] Mapping file not found. Skipping: ${resolvedMappingPath || mappingPath}`);
-            } else {
+            const mappingPlan = buildInsertVideoMappingPlan({
+                scriptItems,
+                topLevelMappingPath,
+                defaultInsertVideoMappingPath: DEFAULT_INSERT_VIDEO_MAPPING_PATH,
+                skipAlreadyProcessed: true
+            });
+            const mappingLoadCache = new Map();
+            const reportedCandidateErrors = new Set();
+            const groupedTargets = new Map();
+
+            const loadMappingCandidate = (candidatePath) => {
+                if (mappingLoadCache.has(candidatePath)) {
+                    return mappingLoadCache.get(candidatePath);
+                }
+                const resolvedPath = resolveWorkPath(candidatePath, normalizedWorkDir);
+                if (!resolvedPath || !fs.existsSync(resolvedPath)) {
+                    const missingResult = {
+                        success: false,
+                        path: candidatePath,
+                        resolvedPath,
+                        error: 'file not found'
+                    };
+                    mappingLoadCache.set(candidatePath, missingResult);
+                    return missingResult;
+                }
                 try {
-                    const mappingRaw = fs.readFileSync(resolvedMappingPath, 'utf8');
+                    const mappingRaw = fs.readFileSync(resolvedPath, 'utf8');
                     const mappingData = JSON.parse(mappingRaw);
+                    const successResult = {
+                        success: true,
+                        path: candidatePath,
+                        resolvedPath,
+                        data: mappingData
+                    };
+                    mappingLoadCache.set(candidatePath, successResult);
+                    return successResult;
+                } catch (error) {
+                    const parseErrorResult = {
+                        success: false,
+                        path: candidatePath,
+                        resolvedPath,
+                        error: error.message
+                    };
+                    mappingLoadCache.set(candidatePath, parseErrorResult);
+                    return parseErrorResult;
+                }
+            };
+
+            mappingPlan.forEach(({ index, item, candidates }) => {
+                const candidateList = Array.isArray(candidates) ? candidates : [];
+                let chosenPath = null;
+
+                for (let i = 0; i < candidateList.length; i += 1) {
+                    const candidate = candidateList[i];
+                    const loaded = loadMappingCandidate(candidate);
+                    if (loaded.success) {
+                        chosenPath = candidate;
+                        break;
+                    }
+                    if (loaded.resolvedPath && loaded.error && loaded.error !== 'file not found') {
+                        const errorKey = `${candidate}|${loaded.resolvedPath}|${loaded.error}`;
+                        if (!reportedCandidateErrors.has(errorKey)) {
+                            reportedCandidateErrors.add(errorKey);
+                            log.warn?.(`[InsertVideoAdjust] Mapping load failed: ${loaded.resolvedPath} (${loaded.error})`);
+                        }
+                    }
+                }
+
+                if (!chosenPath) {
+                    log.warn?.(
+                        `[InsertVideoAdjust] Mapping file not found for insert_video. ` +
+                        `start=${item?.startTime || item?.start_time || '-'} end=${item?.endTime || item?.end_time || '-'} ` +
+                        `path=${item?.insert_video || item?.videoPath || item?.path || '-'} candidates=${candidateList.join(', ')}`
+                    );
+                    return;
+                }
+
+                if (!groupedTargets.has(chosenPath)) {
+                    groupedTargets.set(chosenPath, []);
+                }
+                groupedTargets.get(chosenPath).push(index);
+            });
+
+            groupedTargets.forEach((targetIndexes, mappingPath) => {
+                const loaded = mappingLoadCache.get(mappingPath);
+                if (!loaded?.success || !loaded.data) return;
+                try {
                     const { updatedScriptItems, unmatchedItems } = adjustInsertVideoTimingsCore({
                         scriptItems,
-                        mappingData,
+                        mappingData: loaded.data,
                         skipAlreadyProcessed: true,
-                        toleranceSeconds: 1
+                        toleranceSeconds: 1,
+                        targetIndexes
                     });
                     scriptItems = updatedScriptItems;
                     if (unmatchedItems.length) {
-                        log.warn?.(`[InsertVideoAdjust] Unmatched insert_video items: ${unmatchedItems.length}`);
+                        log.warn?.(`[InsertVideoAdjust] Unmatched insert_video items: ${unmatchedItems.length} (mapping: ${loaded.resolvedPath || mappingPath})`);
                         unmatchedItems.forEach((item) => {
                             log.warn?.(`[InsertVideoAdjust] Unmatched start=${item.startTime || '-'} end=${item.endTime || '-'} text=${item.text || ''}`);
                         });
                     }
                 } catch (error) {
-                    log.warn?.(`[InsertVideoAdjust] Failed to apply mapping. Skipping: ${error.message}`);
+                    log.warn?.(`[InsertVideoAdjust] Failed to apply mapping (${loaded.resolvedPath || mappingPath}). Skipping: ${error.message}`);
                 }
-            }
+            });
         }
 
         const youtubeInfo = {
@@ -397,7 +479,7 @@ const runPodcastRunner = async ({
                         thumbnailPath: podcast.youtube.thumbnailPath ?? '',
                         fixedDescription: podcast.youtube.fixedDescription ?? ''
                     },
-                    insertVideoMapping: mappingPath,
+                    insertVideoMapping: topLevelMappingPath,
                     runtimeOverrides: {
                         videoFormat: effectiveVideoFormat,
                         playbackSpeed: effectivePlaybackSpeed,

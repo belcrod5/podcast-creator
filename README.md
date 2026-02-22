@@ -160,7 +160,12 @@ node electron/cli/podcast-runner.js \
   - 例: `おはようございます{WAIT:3}今日もいい天気です`
   - WAIT中は映像を停止します。PiPがある場合はPiP側を停止、PiPがない場合はメイン背景動画を停止します。
 - `fixedDescription` は `preset.fixedDescription` → `youtube.fixedDescription` の順で `youtube.description` に追記。
-- `insertVideoMapping` は任意。未指定時は `videos/output.mp4.json` を探し、無ければ警告のみでスキップ。
+- `insertVideoMapping` は任意（トップレベル）。`insert_video` ごとに次の順でマッピングJSONを探索します:
+  1. その要素の `insertVideoMapping` / `insert_video_mapping`
+  2. その要素の `insert_video + ".json"`（例: `/path/clip.mp4` → `/path/clip.mp4.json`）
+  3. トップレベルの `insertVideoMapping`
+  4. `videos/output.mp4.json`
+  見つからない場合は警告のみでスキップします。
 - CLIは `processing-complete` まで待機し、成功時は exit code 0 / 失敗時は 1。
 - GUI/CLIどちらの実行でも、実行内容は `<workdir>/.podcast-creator/saves/` にセーブされます。
 - `--resume latest` で最新セーブを再実行できます。

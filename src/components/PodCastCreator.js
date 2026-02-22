@@ -51,6 +51,7 @@ const { usePodCast } = require('../contexts/PodCastContext');
 const {
     normalizeScriptItems,
     adjustInsertVideoTimingsCore,
+    buildInsertVideoMappingPlan,
     parseTimeInput,
     formatTimeInput,
     sanitizeTimeValue,
@@ -373,19 +374,12 @@ const PodCastCreator = () => {
             executeDeferredRef.current.timer = null;
 
             try {
-                const mappingResult = await window.electron?.tts?.readJsonFile?.(DEFAULT_INSERT_VIDEO_MAPPING_PATH);
-                if (!mappingResult || !mappingResult.success || !mappingResult.data) {
-                    console.warn('[InsertVideoAdjust] Mapping JSON の読み込みに失敗しました', mappingResult?.error);
-                    return;
-                }
-
                 const runAdjust = typeof adjustInsertVideoTimingsRef.current === 'function'
                     ? adjustInsertVideoTimingsRef.current
                     : adjustInsertVideoTimings;
 
                 await runAdjust({
                     source: 'file',
-                    mappingData: mappingResult.data,
                     skipAlreadyProcessed: true
                 });
             } catch (error) {
@@ -420,6 +414,7 @@ const PodCastCreator = () => {
     const [speakers, setSpeakers] = useState([]);
     const [englishSpeakers, setEnglishSpeakers] = useState([]);
     const [formData, setFormData] = useState(() => createInitialFormState());
+    const [insertVideoMappingPath, setInsertVideoMappingPath] = useState(DEFAULT_INSERT_VIDEO_MAPPING_PATH);
 
     // YouTube認証関連の状態
     const [isYoutubeAuthChecking, setIsYoutubeAuthChecking] = useState(false);
@@ -1236,6 +1231,12 @@ const PodCastCreator = () => {
 
             const text = await navigator.clipboard.readText();
             const data = JSON.parse(text);
+            const nextInsertVideoMappingPath = (
+                typeof data?.insertVideoMapping === 'string' && data.insertVideoMapping.trim()
+            )
+                ? data.insertVideoMapping.trim()
+                : DEFAULT_INSERT_VIDEO_MAPPING_PATH;
+            setInsertVideoMappingPath(nextInsertVideoMappingPath);
 
             // スクリプトデータの設定
             if (data.script && data.script.length > 0) {
@@ -1320,8 +1321,14 @@ const PodCastCreator = () => {
             const restoredTags = Array.isArray(youtube.tags) ? youtube.tags.join(',') : (youtube.tags || '');
             const restoredCategory = youtube.category || youtube.categoryId || '22';
             const restoredBackgroundText = runtimeOverrides.backgroundText || youtube.title || '';
+            const restoredInsertVideoMappingPath = (
+                typeof request.insertVideoMapping === 'string' && request.insertVideoMapping.trim()
+            )
+                ? request.insertVideoMapping.trim()
+                : DEFAULT_INSERT_VIDEO_MAPPING_PATH;
 
             setScriptItems(restoredScriptItems);
+            setInsertVideoMappingPath(restoredInsertVideoMappingPath);
             setFormData(prev => ({
                 ...prev,
                 script: {
@@ -1634,12 +1641,109 @@ const PodCastCreator = () => {
         } = options || {};
         try {
             let parsed = mappingData;
-            if (!parsed) {
-                if (source === 'file') {
-                    console.warn('[InsertVideoAdjust] mappingDataが提供されていません。');
+            let updatedScriptItems = scriptItems;
+            let unmatchedItems = [];
+            let hasApplied = false;
+
+            if (parsed) {
+                const adjusted = adjustInsertVideoTimingsCore({
+                    scriptItems: updatedScriptItems,
+                    mappingData: parsed,
+                    skipAlreadyProcessed,
+                    toleranceSeconds: INSERT_VIDEO_MATCH_TOLERANCE_SECONDS
+                });
+                updatedScriptItems = adjusted.updatedScriptItems;
+                unmatchedItems = [...unmatchedItems, ...adjusted.unmatchedItems];
+                hasApplied = true;
+            } else if (source === 'file') {
+                const mappingPlan = buildInsertVideoMappingPlan({
+                    scriptItems: updatedScriptItems,
+                    topLevelMappingPath: insertVideoMappingPath,
+                    defaultInsertVideoMappingPath: DEFAULT_INSERT_VIDEO_MAPPING_PATH,
+                    skipAlreadyProcessed
+                });
+                if (!mappingPlan.length) {
+                    console.warn('[InsertVideoAdjust] 調整対象の insert_video がありません。');
                     return;
                 }
 
+                const mappingLoadCache = new Map();
+                const reportedCandidateErrors = new Set();
+                const groupedTargets = new Map();
+
+                const loadMappingCandidate = async (candidatePath) => {
+                    if (mappingLoadCache.has(candidatePath)) {
+                        return mappingLoadCache.get(candidatePath);
+                    }
+                    const readResult = await window.electron?.tts?.readJsonFile?.(candidatePath);
+                    const ok = !!(readResult && readResult.success && readResult.data);
+                    const result = ok
+                        ? { success: true, path: candidatePath, data: readResult.data }
+                        : { success: false, path: candidatePath, error: readResult?.error || 'failed to read mapping file' };
+                    mappingLoadCache.set(candidatePath, result);
+                    return result;
+                };
+
+                for (let i = 0; i < mappingPlan.length; i += 1) {
+                    const { index, item, candidates } = mappingPlan[i];
+                    const candidateList = Array.isArray(candidates) ? candidates : [];
+                    let chosenPath = null;
+
+                    for (let j = 0; j < candidateList.length; j += 1) {
+                        const candidate = candidateList[j];
+                        const loaded = await loadMappingCandidate(candidate);
+                        if (loaded.success) {
+                            chosenPath = candidate;
+                            break;
+                        }
+                        if (loaded.error && loaded.error !== 'ファイルが存在しません') {
+                            const errorKey = `${candidate}|${loaded.error}`;
+                            if (!reportedCandidateErrors.has(errorKey)) {
+                                reportedCandidateErrors.add(errorKey);
+                                console.warn(`[InsertVideoAdjust] Mapping load failed: ${candidate} (${loaded.error})`);
+                            }
+                        }
+                    }
+
+                    if (!chosenPath) {
+                        console.warn(
+                            '[InsertVideoAdjust] Mapping file not found for insert_video',
+                            {
+                                startTime: item?.startTime || item?.start_time || '-',
+                                endTime: item?.endTime || item?.end_time || '-',
+                                path: item?.insert_video || item?.videoPath || item?.path || '-',
+                                candidates: candidateList
+                            }
+                        );
+                        continue;
+                    }
+
+                    if (!groupedTargets.has(chosenPath)) {
+                        groupedTargets.set(chosenPath, []);
+                    }
+                    groupedTargets.get(chosenPath).push(index);
+                }
+
+                for (const [mappingPath, targetIndexes] of groupedTargets.entries()) {
+                    const loaded = mappingLoadCache.get(mappingPath);
+                    if (!loaded?.success || !loaded.data) continue;
+                    const adjusted = adjustInsertVideoTimingsCore({
+                        scriptItems: updatedScriptItems,
+                        mappingData: loaded.data,
+                        skipAlreadyProcessed,
+                        toleranceSeconds: INSERT_VIDEO_MATCH_TOLERANCE_SECONDS,
+                        targetIndexes
+                    });
+                    updatedScriptItems = adjusted.updatedScriptItems;
+                    unmatchedItems = [...unmatchedItems, ...adjusted.unmatchedItems];
+                    hasApplied = true;
+                }
+
+                if (!hasApplied) {
+                    console.warn('[InsertVideoAdjust] 適用可能なマッピングが見つかりませんでした。');
+                    return;
+                }
+            } else {
                 const clipboardText = await navigator.clipboard.readText();
                 if (!clipboardText) {
                     alert('クリップボードにマッピングデータがありません');
@@ -1653,14 +1757,21 @@ const PodCastCreator = () => {
                     alert('クリップボードのデータをJSONとして解析できませんでした');
                     return;
                 }
+                const adjusted = adjustInsertVideoTimingsCore({
+                    scriptItems: updatedScriptItems,
+                    mappingData: parsed,
+                    skipAlreadyProcessed,
+                    toleranceSeconds: INSERT_VIDEO_MATCH_TOLERANCE_SECONDS
+                });
+                updatedScriptItems = adjusted.updatedScriptItems;
+                unmatchedItems = [...unmatchedItems, ...adjusted.unmatchedItems];
+                hasApplied = true;
             }
 
-            const { updatedScriptItems, unmatchedItems } = adjustInsertVideoTimingsCore({
-                scriptItems,
-                mappingData: parsed,
-                skipAlreadyProcessed,
-                toleranceSeconds: INSERT_VIDEO_MATCH_TOLERANCE_SECONDS
-            });
+            if (!hasApplied) {
+                console.warn('[InsertVideoAdjust] マッピング適用対象がありません。');
+                return;
+            }
 
             pendingVideoAdjustResultRef.current = {
                 updatedScriptItems,
@@ -1677,7 +1788,7 @@ const PodCastCreator = () => {
             console.error('Failed to adjust insert video timings:', error);
             alert(`挿入動画の時間調整に失敗しました: ${error.message}`);
         }
-    }, [scriptItems]);
+    }, [scriptItems, insertVideoMappingPath]);
 
     useEffect(() => {
         adjustInsertVideoTimingsRef.current = adjustInsertVideoTimings;
@@ -1741,7 +1852,7 @@ const PodCastCreator = () => {
             },
             videoFormat,
             presetId: selectedPresetId || '',
-            insertVideoMapping: DEFAULT_INSERT_VIDEO_MAPPING_PATH,
+            insertVideoMapping: insertVideoMappingPath || DEFAULT_INSERT_VIDEO_MAPPING_PATH,
             runtimeOverrides: {
                 videoFormat,
                 playbackSpeed,
@@ -1763,6 +1874,7 @@ const PodCastCreator = () => {
         // フォームをリセット
         setFormData(createInitialFormState());
         setScriptItems([]);
+        setInsertVideoMappingPath(DEFAULT_INSERT_VIDEO_MAPPING_PATH);
         setYoutubeTokenError(false);
         setYoutubeTokenDialogOpen(false);
     };

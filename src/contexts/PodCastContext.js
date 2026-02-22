@@ -1,6 +1,12 @@
 const React = require('react');
 const { createContext, useContext, useState, useCallback, useEffect } = require('react');
 const { v4: uuidv4 } = require('uuid');
+const {
+    DEFAULT_INSERT_VIDEO_MAPPING_PATH,
+    normalizeScriptItems,
+    adjustInsertVideoTimingsCore,
+    buildInsertVideoMappingPlan
+} = require('../../shared/podcast-script');
 
 const PodCastContext = createContext(null);
 const tts = window.electron.tts;
@@ -36,6 +42,7 @@ const LANGUAGE_CODES = {
     JAPANESE: 'ja',
     ENGLISH: 'en'
 };
+const DEFAULT_INSERT_VIDEO_PATH = 'videos/output.mp4';
 
 const normalizeLanguage = (value) => (
     typeof value === 'string' && value.toLowerCase() === LANGUAGE_CODES.ENGLISH
@@ -273,7 +280,101 @@ exports.PodCastProvider = ({ children }) => {
 
 
             const scriptLanguage = normalizeLanguage(queueItem?.script?.language);
-            const datasWithLanguage = datas.map((dataItem = {}) => {
+            let normalizedScriptItems = normalizeScriptItems(datas, {
+                defaultInsertVideoPath: DEFAULT_INSERT_VIDEO_PATH
+            });
+
+            const topLevelMappingPath = (
+                typeof queueItem?.insertVideoMapping === 'string' && queueItem.insertVideoMapping.trim()
+            )
+                ? queueItem.insertVideoMapping.trim()
+                : DEFAULT_INSERT_VIDEO_MAPPING_PATH;
+            const mappingPlan = buildInsertVideoMappingPlan({
+                scriptItems: normalizedScriptItems,
+                topLevelMappingPath,
+                defaultInsertVideoMappingPath: DEFAULT_INSERT_VIDEO_MAPPING_PATH,
+                skipAlreadyProcessed: true
+            });
+
+            if (mappingPlan.length) {
+                const mappingLoadCache = new Map();
+                const reportedCandidateErrors = new Set();
+                const groupedTargets = new Map();
+
+                const loadMappingCandidate = async (candidatePath) => {
+                    if (mappingLoadCache.has(candidatePath)) {
+                        return mappingLoadCache.get(candidatePath);
+                    }
+                    const readResult = await tts.readJsonFile(candidatePath);
+                    const ok = !!(readResult && readResult.success && readResult.data);
+                    const result = ok
+                        ? { success: true, path: candidatePath, data: readResult.data }
+                        : { success: false, path: candidatePath, error: readResult?.error || 'failed to read mapping file' };
+                    mappingLoadCache.set(candidatePath, result);
+                    return result;
+                };
+
+                for (let i = 0; i < mappingPlan.length; i += 1) {
+                    const { index, item, candidates } = mappingPlan[i];
+                    const candidateList = Array.isArray(candidates) ? candidates : [];
+                    let chosenPath = null;
+
+                    for (let j = 0; j < candidateList.length; j += 1) {
+                        const candidate = candidateList[j];
+                        const loaded = await loadMappingCandidate(candidate);
+                        if (loaded.success) {
+                            chosenPath = candidate;
+                            break;
+                        }
+                        if (loaded.error && loaded.error !== 'ファイルが存在しません') {
+                            const errorKey = `${candidate}|${loaded.error}`;
+                            if (!reportedCandidateErrors.has(errorKey)) {
+                                reportedCandidateErrors.add(errorKey);
+                                console.warn(`[InsertVideoAdjust] Mapping load failed: ${candidate} (${loaded.error})`);
+                            }
+                        }
+                    }
+
+                    if (!chosenPath) {
+                        console.warn(
+                            '[InsertVideoAdjust] Mapping file not found for insert_video',
+                            {
+                                startTime: item?.startTime || item?.start_time || '-',
+                                endTime: item?.endTime || item?.end_time || '-',
+                                path: item?.insert_video || item?.videoPath || item?.path || '-',
+                                candidates: candidateList
+                            }
+                        );
+                        continue;
+                    }
+
+                    if (!groupedTargets.has(chosenPath)) {
+                        groupedTargets.set(chosenPath, []);
+                    }
+                    groupedTargets.get(chosenPath).push(index);
+                }
+
+                for (const [mappingPath, targetIndexes] of groupedTargets.entries()) {
+                    const loaded = mappingLoadCache.get(mappingPath);
+                    if (!loaded?.success || !loaded.data) continue;
+                    const adjusted = adjustInsertVideoTimingsCore({
+                        scriptItems: normalizedScriptItems,
+                        mappingData: loaded.data,
+                        skipAlreadyProcessed: true,
+                        toleranceSeconds: 1,
+                        targetIndexes
+                    });
+                    normalizedScriptItems = adjusted.updatedScriptItems;
+                    if (adjusted.unmatchedItems.length) {
+                        console.warn(`[InsertVideoAdjust] Unmatched insert_video items: ${adjusted.unmatchedItems.length}`);
+                        adjusted.unmatchedItems.forEach((entry) => {
+                            console.warn(`[InsertVideoAdjust] Unmatched start=${entry.startTime || '-'} end=${entry.endTime || '-'} text=${entry.text || ''}`);
+                        });
+                    }
+                }
+            }
+
+            const datasWithLanguage = normalizedScriptItems.map((dataItem = {}) => {
                 const normalized = typeof dataItem.language === 'string'
                     ? normalizeLanguage(dataItem.language)
                     : scriptLanguage;
@@ -315,7 +416,7 @@ exports.PodCastProvider = ({ children }) => {
                         thumbnailPath: queueItem?.youtubeInfo?.thumbnailPath || '',
                         fixedDescription: queueItem?.youtubeInfo?.fixedDescription || ''
                     },
-                    insertVideoMapping: queueItem?.insertVideoMapping || '',
+                    insertVideoMapping: topLevelMappingPath,
                     runtimeOverrides: {
                         ...queueRuntimeOverrides,
                         videoFormat: queueItem?.videoFormat ?? queueRuntimeOverrides?.videoFormat ?? 'landscape',

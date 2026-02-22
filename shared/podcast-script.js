@@ -1,4 +1,5 @@
 const DEFAULT_INSERT_VIDEO_PATH = 'videos/output.mp4';
+const DEFAULT_INSERT_VIDEO_MAPPING_PATH = `${DEFAULT_INSERT_VIDEO_PATH}.json`;
 
 const parseTimeInput = (value) => {
     if (!value) return 0;
@@ -106,6 +107,71 @@ const normalizeTimeKey = (value) => {
     return formatSecondsWithMilliseconds(seconds);
 };
 
+const normalizeNonEmptyString = (value) => (
+    typeof value === 'string' && value.trim() ? value.trim() : ''
+);
+
+const hasSchemePrefix = (value) => /^[a-zA-Z][a-zA-Z0-9+.-]*:/.test(value);
+
+const isWindowsAbsolutePath = (value) => /^[a-zA-Z]:[\\/]/.test(value);
+
+const buildInsertVideoMappingCandidates = ({
+    item,
+    topLevelMappingPath = '',
+    defaultInsertVideoMappingPath = DEFAULT_INSERT_VIDEO_MAPPING_PATH
+} = {}) => {
+    const target = (item && typeof item === 'object') ? item : {};
+    const candidates = [];
+    const pushCandidate = (candidate) => {
+        const normalized = normalizeNonEmptyString(candidate);
+        if (!normalized || candidates.includes(normalized)) return;
+        candidates.push(normalized);
+    };
+
+    const itemLevelMappingPath = normalizeNonEmptyString(
+        target.insertVideoMapping || target.insert_video_mapping
+    );
+    if (itemLevelMappingPath) {
+        pushCandidate(itemLevelMappingPath);
+    }
+
+    const insertVideoPath = normalizeNonEmptyString(target.insert_video || target.videoPath || target.path);
+    if (insertVideoPath) {
+        const canDeriveFromInsertVideo = (
+            isWindowsAbsolutePath(insertVideoPath)
+            || insertVideoPath.startsWith('/')
+            || !hasSchemePrefix(insertVideoPath)
+        );
+        if (canDeriveFromInsertVideo) {
+            pushCandidate(`${insertVideoPath}.json`);
+        }
+    }
+
+    pushCandidate(topLevelMappingPath);
+    pushCandidate(defaultInsertVideoMappingPath);
+    return candidates;
+};
+
+const buildInsertVideoMappingPlan = ({
+    scriptItems = [],
+    topLevelMappingPath = '',
+    defaultInsertVideoMappingPath = DEFAULT_INSERT_VIDEO_MAPPING_PATH,
+    skipAlreadyProcessed = false
+} = {}) => (
+    (Array.isArray(scriptItems) ? scriptItems : [])
+        .map((item, index) => ({ item, index }))
+        .filter(({ item }) => item && item.insert_video && (!skipAlreadyProcessed || !item.insert_video_done))
+        .map(({ item, index }) => ({
+            index,
+            item,
+            candidates: buildInsertVideoMappingCandidates({
+                item,
+                topLevelMappingPath,
+                defaultInsertVideoMappingPath
+            })
+        }))
+);
+
 const normalizeScriptItems = (items = [], options = {}) => {
     const defaultInsertVideoPath = (options && typeof options.defaultInsertVideoPath === 'string' && options.defaultInsertVideoPath.trim())
         ? options.defaultInsertVideoPath
@@ -177,7 +243,8 @@ const adjustInsertVideoTimingsCore = ({
     scriptItems = [],
     mappingData,
     skipAlreadyProcessed = false,
-    toleranceSeconds = 1
+    toleranceSeconds = 1,
+    targetIndexes = null
 } = {}) => {
     if (!mappingData || !Array.isArray(mappingData.script)) {
         throw new Error('マッピングデータにscript配列が存在しません');
@@ -188,9 +255,18 @@ const adjustInsertVideoTimingsCore = ({
         throw new Error('マッピングデータのscript配列が空です');
     }
 
+    const targetIndexSet = Array.isArray(targetIndexes) && targetIndexes.length
+        ? new Set(targetIndexes.filter((value) => Number.isInteger(value) && value >= 0))
+        : null;
+
     const scriptItemsWithVideo = scriptItems
         .map((item, index) => ({ item, index }))
-        .filter(({ item }) => item && item.insert_video && (!skipAlreadyProcessed || !item.insert_video_done));
+        .filter(({ item, index }) => {
+            if (!item || !item.insert_video) return false;
+            if (skipAlreadyProcessed && item.insert_video_done) return false;
+            if (targetIndexSet && !targetIndexSet.has(index)) return false;
+            return true;
+        });
     if (!scriptItemsWithVideo.length) {
         throw new Error('挿入動画が設定されたスクリプトがありません');
     }
@@ -434,6 +510,7 @@ const adjustInsertVideoTimingsCore = ({
 };
 
 module.exports = {
+    DEFAULT_INSERT_VIDEO_MAPPING_PATH,
     parseTimeInput,
     formatTimeInput,
     sanitizeTimeValue,
@@ -441,6 +518,8 @@ module.exports = {
     parseTimeToSeconds,
     formatSecondsWithMilliseconds,
     normalizeTimeKey,
+    buildInsertVideoMappingCandidates,
+    buildInsertVideoMappingPlan,
     normalizeScriptItems,
     adjustInsertVideoTimingsCore
 };
