@@ -3965,6 +3965,24 @@ class TTSServiceInstance {
         const safeOffset = (typeof offsetSeconds === 'number' && isFinite(offsetSeconds) && offsetSeconds > 0)
             ? offsetSeconds
             : 0;
+        let captureOffset = safeOffset;
+        if (safeOffset > 0) {
+            try {
+                const videoDuration = await getVideoDuration(videoPath);
+                if (Number.isFinite(videoDuration) && videoDuration > 0) {
+                    // ループ再生相当の停止フレームを取るため、動画尺で正規化する
+                    captureOffset = safeOffset % videoDuration;
+                    if (captureOffset < 0) {
+                        captureOffset += videoDuration;
+                    }
+                    if (captureOffset >= videoDuration) {
+                        captureOffset = 0;
+                    }
+                }
+            } catch (error) {
+                console.warn(`動画長の取得に失敗したため、停止フレーム抽出オフセットをそのまま使用します: ${videoPath}`, error?.message || error);
+            }
+        }
         const framePath = path.join(
             TEMP_DIR,
             `wait_frame_${Date.now()}_${Math.random().toString(16).slice(2)}.png`
@@ -3973,8 +3991,8 @@ class TTSServiceInstance {
         try {
             await new Promise((resolve, reject) => {
                 let command = ffmpeg(videoPath);
-                if (safeOffset > 0) {
-                    command = command.inputOptions(['-ss', `${safeOffset}`]);
+                if (captureOffset > 0) {
+                    command = command.inputOptions(['-ss', `${captureOffset}`]);
                 }
                 command
                     .outputOptions(['-frames:v', '1', '-q:v', '2'])
