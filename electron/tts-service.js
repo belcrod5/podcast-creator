@@ -1086,6 +1086,10 @@ class TTSServiceMain extends EventEmitter {
         if (!this.currentInstance) {
             const instance = new TTSServiceInstance();
             instance.setYoutubeInfo(this.youtubeInfo);
+            // 事前認証チェックと同じトークンを必ず使う
+            if (typeof instance.setYoutubeTokenFile === 'function') {
+                instance.setYoutubeTokenFile(this.youtubeTokenFile);
+            }
             // BGM設定をインスタンスへ反映
             instance.currentBgmPath = this.currentBgmPath;
             instance.setBgmVolume(this.currentBgmVolume);
@@ -1112,6 +1116,9 @@ class TTSServiceMain extends EventEmitter {
             this.instances.push(instance);
             this.currentInstance = instance;
         } else {
+            if (typeof this.currentInstance.setYoutubeTokenFile === 'function') {
+                this.currentInstance.setYoutubeTokenFile(this.youtubeTokenFile);
+            }
             if (typeof this.currentInstance.setBgmVolume === 'function') {
                 this.currentInstance.setBgmVolume(this.currentBgmVolume);
             }
