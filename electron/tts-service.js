@@ -975,6 +975,10 @@ class TTSServiceMain extends EventEmitter {
         this.emit('processing-complete', payload);
     }
 
+    emitProcessingError(payload = {}) {
+        this.emit('processing-error', payload);
+    }
+
     /**
      * 利用可能なBGM(.mp3)の一覧を取得
      * @returns {Array<{fileName:string, path:string}>}
@@ -1177,33 +1181,43 @@ class TTSServiceMain extends EventEmitter {
             backgroundPath: backgroundPath || 'default'
         });
         const mainTimer = performanceLogger.startTimer('makeVideo_main_total');
+        try {
+            const result = await this.currentInstance.makeVideo(backgroundPath,
+                // 進捗コールバックを追加
+                (progress) => {
+                    this.emitProgress('video', progress);
+                },
+                (progress) => {
+                    this.emitProgress('upload', progress);
+                }
+            );
 
-        const result = await this.currentInstance.makeVideo(backgroundPath,
-            // 進捗コールバックを追加
-            (progress) => {
-                this.emitProgress('video', progress);
-            },
-            (progress) => {
-                this.emitProgress('upload', progress);
-            }
-        );
+            // パフォーマンスログ終了と保存
+            mainTimer.end({ result: !!result });
+            performanceLogger.saveLogs({
+                videoInfo: {
+                    path: result,
+                    autoGenerateVideo: this.currentInstance?.autoGenerateVideo || false,
+                    autoUploadToYoutube: this.currentInstance?.autoUploadToYoutube || false
+                }
+            });
 
-        // パフォーマンスログ終了と保存
-        mainTimer.end({ result: !!result });
-        performanceLogger.saveLogs({
-            videoInfo: {
-                path: result,
-                autoGenerateVideo: this.currentInstance?.autoGenerateVideo || false,
+            this.emitProgress('video', 1); // 完了時に100%を送信
+            this.emitProcessingComplete({
+                outputPath: result || null,
                 autoUploadToYoutube: this.currentInstance?.autoUploadToYoutube || false
-            }
-        });
-
-        this.emitProgress('video', 1); // 完了時に100%を送信
-        this.emitProcessingComplete({
-            outputPath: result || null,
-            autoUploadToYoutube: this.currentInstance?.autoUploadToYoutube || false
-        });
-        return result;
+            });
+            return result;
+        } catch (error) {
+            const message = error?.message || '動画生成に失敗しました';
+            performanceLogger.addLog('makeVideo_main_error', { error: message });
+            mainTimer.end({ result: false, error: message });
+            this.emitProcessingError({
+                stage: 'video',
+                error: message
+            });
+            throw error;
+        }
     }
 
     // 自動生成設定を変更するメソッドを追加
@@ -1534,6 +1548,18 @@ class TTSServiceMain extends EventEmitter {
         } catch (error) {
             console.error('YouTube auth check failed:', error);
             return false;
+        }
+    }
+
+    async ensureYoutubeAuthOrThrow() {
+        const uploader = this._getYoutubeUploader();
+        try {
+            await uploader.authenticate();
+            return true;
+        } catch (error) {
+            const tokenPath = uploader?.TOKEN_PATH ? ` (token: ${uploader.TOKEN_PATH})` : '';
+            const message = error?.message || 'YouTube認証に失敗しました';
+            throw new Error(`YouTube認証エラー: ${message}${tokenPath}`);
         }
     }
 
@@ -2934,8 +2960,9 @@ class TTSServiceInstance {
     async uploadToYoutube(videoPath, onProgress) {
 
         const uploader = this._getYoutubeUploader();
+        // アップロード直前に認証チェックを強制する
         await uploader.authenticate();
-        await uploader.uploadVideo({
+        const uploadResult = await uploader.uploadVideo({
             videoPath: videoPath,
             title: this.youtubeInfo.title,
             description: this.youtubeInfo.description,
@@ -2947,6 +2974,12 @@ class TTSServiceInstance {
                 onProgress(progress);
             }
         });
+        if (!uploadResult || uploadResult.success !== true) {
+            const errorMessage = (uploadResult && typeof uploadResult.error === 'string' && uploadResult.error.trim())
+                ? uploadResult.error.trim()
+                : 'YouTubeアップロードに失敗しました';
+            throw new Error(errorMessage);
+        }
     }
 
     _getYoutubeUploader() {

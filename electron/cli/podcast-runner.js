@@ -296,6 +296,21 @@ const runPodcastRunner = async ({
             ? runtimeOverrides.introBgVideo.trim()
             : preset.introBgVideo;
 
+        if (typeof ttsService.setYoutubeTokenFile === 'function' && effectiveYoutubeToken) {
+            ttsService.setYoutubeTokenFile(effectiveYoutubeToken);
+        }
+
+        if (effectiveAutoUpload) {
+            if (typeof ttsService.ensureYoutubeAuthOrThrow === 'function') {
+                await ttsService.ensureYoutubeAuthOrThrow();
+            } else if (typeof ttsService.checkYoutubeAuth === 'function') {
+                const isAuthValid = await ttsService.checkYoutubeAuth();
+                if (!isAuthValid) {
+                    throw new Error('YouTube認証エラー: 認証済みトークンが見つからないか、有効期限が切れています。');
+                }
+            }
+        }
+
         const speakerIds = collectSpeakerIds(podcast.script);
         if (speakerIds.length) {
             const lang = effectiveLanguage;
@@ -521,16 +536,27 @@ const runPodcastRunner = async ({
             log.info?.(`[progress] ${data.type}: ${formatProgress(data.progress)}`);
         };
 
-        const processingComplete = new Promise((resolve) => {
-            const onComplete = (data) => {
+        const processingComplete = new Promise((resolve, reject) => {
+            const cleanup = () => {
                 ttsService.off('processing-complete', onComplete);
+                ttsService.off('processing-error', onError);
                 ttsService.off('progress', progressHandler);
+            };
+            const onComplete = (data) => {
+                cleanup();
                 resolve({ data });
             };
+            const onError = (payload) => {
+                cleanup();
+                const detail = (typeof payload?.error === 'string' && payload.error.trim())
+                    ? payload.error.trim()
+                    : 'processing failed';
+                reject(new Error(detail));
+            };
             ttsService.on('processing-complete', onComplete);
+            ttsService.on('processing-error', onError);
+            ttsService.on('progress', progressHandler);
         });
-
-        ttsService.on('progress', progressHandler);
 
         const presetLang = effectiveLanguage;
         ttsService.playAudio(
@@ -548,9 +574,6 @@ const runPodcastRunner = async ({
         }
         if (typeof ttsService.setAutoUploadToYoutube === 'function') {
             ttsService.setAutoUploadToYoutube(effectiveAutoUpload);
-        }
-        if (typeof ttsService.setYoutubeTokenFile === 'function' && effectiveYoutubeToken) {
-            ttsService.setYoutubeTokenFile(effectiveYoutubeToken);
         }
         if (typeof ttsService.setYoutubeInfo === 'function') {
             ttsService.setYoutubeInfo(youtubeInfo);
