@@ -1,7 +1,7 @@
 const axios = require('axios');
 const fs = require('fs');
 const path = require('path');
-const { exec, spawn, spawnSync } = require('child_process');
+const { exec, spawnSync } = require('child_process');
 const os = require('os');
 const crypto = require('crypto');
 const { EventEmitter } = require('events');
@@ -266,6 +266,9 @@ const SUBTITLE_WRAP_MAX_CHARS_PER_LINE = 160;
 // CallOut（上部テロップ）の折り返し最小文字数
 // - Short動画ではフォントが大きく、字幕用(10)だと横にはみ出しやすいため別で管理する
 const CALLOUT_WRAP_MIN_CHARS_PER_LINE = 7;
+const CALLOUT_WRAP_MIN_CHARS_PER_LINE_SHORT = 3;
+const CALLOUT_WRAP_FONT_WIDTH_SAFETY_SHORT = 1.2;
+const CALLOUT_WRAP_CHARS_EXTRA_SHORT = 3;
 
 // CallOut（上部テロップ）の余白(padding)を言語別に調整する（px）
 // - layout側の callout.marginX/marginY に「加算」されます
@@ -447,6 +450,13 @@ function wrapTextForDrawText(text, maxCharsPerLine = 15, language = LANGUAGE_COD
     });
 
     return wrappedLines.join('\n');
+}
+
+function escapeFfmpegFilterValue(value) {
+    return String(value ?? '')
+        .replace(/\\/g, '/')
+        .replace(/:/g, '\\:')
+        .replace(/'/g, "\\'");
 }
 
 function formatSrtTimestamp(seconds) {
@@ -3885,54 +3895,74 @@ class TTSServiceInstance {
         const captionWidth = Math.max(1, Math.floor(layout.width * 0.885));
         const fontPath = getFontPath('NotoSansJP-Black.ttf');
         const safeDuration = Number(duration) || 1;
+        const sectionFontSize = 100;
+        const maxCharsPerLine = Math.max(1, Math.floor(captionWidth / Math.max(sectionFontSize, 1)));
 
         return new Promise((resolve, reject) => {
-            const imagePath = path.join(TEMP_DIR, `section_bg_${Date.now()}.png`);
-            // Black background, white text, centered, with wrapping and padding
-            const command = `"${MAGICK_BIN}" -background black -fill white -font "${fontPath}" -pointsize 100 -size ${captionWidth}x caption:"${text}" -gravity center -extent ${extent} "${imagePath}"`;
+            const textFilePath = path.join(TEMP_DIR, `section_text_${Date.now()}.txt`);
+            const textValue = String(text ?? '');
+            const wrappedSectionText = wrapTextForDrawText(
+                textValue,
+                maxCharsPerLine,
+                LANGUAGE_CODES.JAPANESE
+            );
 
-            exec(command, (err) => {
-                if (err) {
-                    console.error('Section image creation failed:', err);
-                    reject(err);
-                    return;
-                }
+            const drawtextFilter = [
+                `drawtext=textfile='${escapeFfmpegFilterValue(textFilePath)}'`,
+                `fontfile='${escapeFfmpegFilterValue(fontPath)}'`,
+                `fontsize=${sectionFontSize}`,
+                'fontcolor=white',
+                'expansion=none',
+                'x=(w-text_w)/2',
+                'y=(h-text_h)/2',
+                'borderw=2',
+                'bordercolor=black'
+            ].join(':');
 
-                const sePath = seFileName ? path.join(getAssetsPath(), 'se', seFileName) : null;
-                const hasSe = sePath && fs.existsSync(sePath);
-                if (seFileName && !hasSe) {
-                    console.warn(`SEファイルが見つからないためスキップします: ${sePath}`);
-                }
+            fs.promises.writeFile(textFilePath, wrappedSectionText, 'utf8')
+                .then(() => {
+                    const sePath = seFileName ? path.join(getAssetsPath(), 'se', seFileName) : null;
+                    const hasSe = sePath && fs.existsSync(sePath);
+                    if (seFileName && !hasSe) {
+                        console.warn(`SEファイルが見つからないためスキップします: ${sePath}`);
+                    }
 
-                let ffmpegCommand = ffmpeg(imagePath)
-                    .loop(safeDuration)
-                    .inputOptions(['-t', `${safeDuration}`]);
-
-                if (hasSe) {
-                    console.log(`Adding SE to section clip: ${sePath}`);
-                    ffmpegCommand = ffmpegCommand.input(sePath);
-                } else {
-                    ffmpegCommand = ffmpegCommand.input('anullsrc=channel_layout=stereo:sample_rate=44100')
+                    let ffmpegCommand = ffmpeg()
+                        .input(`color=c=black:s=${extent}:d=${safeDuration}`)
                         .inputOptions(['-f', 'lavfi']);
-                }
 
-                ffmpegCommand
-                    .outputOptions([
-                        '-t', `${safeDuration}`,
-                        '-c:v', 'libx264',
-                        '-pix_fmt', 'yuv420p',
-                        '-c:a', 'aac',
-                        '-shortest'
-                    ])
-                    .save(outputPath)
-                    .on('end', () => {
-                        try { fs.unlinkSync(imagePath); } catch (e) { }
-                        resolve(outputPath);
-                    })
-                    .on('error', (err) => {
-                        reject(err);
-                    });
-            });
+                    if (hasSe) {
+                        console.log(`Adding SE to section clip: ${sePath}`);
+                        ffmpegCommand = ffmpegCommand.input(sePath);
+                    } else {
+                        ffmpegCommand = ffmpegCommand.input('anullsrc=channel_layout=stereo:sample_rate=44100')
+                            .inputOptions(['-f', 'lavfi']);
+                    }
+
+                    ffmpegCommand
+                        .outputOptions([
+                            '-t', `${safeDuration}`,
+                            '-c:v', 'libx264',
+                            '-pix_fmt', 'yuv420p',
+                            '-c:a', 'aac',
+                            '-shortest'
+                        ])
+                        .videoFilters(drawtextFilter)
+                        .save(outputPath)
+                        .on('end', () => {
+                            try { fs.unlinkSync(textFilePath); } catch (e) { }
+                            resolve(outputPath);
+                        })
+                        .on('error', (err) => {
+                            try { fs.unlinkSync(textFilePath); } catch (e) { }
+                            reject(err);
+                        });
+                })
+                .catch((err) => {
+                    try { fs.unlinkSync(textFilePath); } catch (e) { }
+                    console.error('Section clip creation failed:', err);
+                    reject(err);
+                });
         });
     }
 
@@ -4709,10 +4739,19 @@ class TTSServiceInstance {
                     1,
                     Math.floor(layout.width * calloutMaxWidthRatio) - (calloutMarginX * 2)
                 );
-                const calloutBaseEstimatedChars = Math.floor(calloutTargetWidthPx / Math.max(calloutFontSize, 1));
-                const calloutEstimatedChars = Math.floor(calloutBaseEstimatedChars * calloutWrapMultiplier);
+                const calloutFontWidthSafety = isShortVideo ? CALLOUT_WRAP_FONT_WIDTH_SAFETY_SHORT : 1.0;
+                const calloutBaseEstimatedChars = Math.floor(
+                    calloutTargetWidthPx / Math.max(calloutFontSize * calloutFontWidthSafety, 1)
+                );
+                const calloutEstimatedCharsBase = Math.floor(calloutBaseEstimatedChars * calloutWrapMultiplier);
+                const calloutEstimatedChars = isShortVideo
+                    ? (calloutEstimatedCharsBase + CALLOUT_WRAP_CHARS_EXTRA_SHORT)
+                    : calloutEstimatedCharsBase;
+                const calloutWrapMinChars = isShortVideo
+                    ? CALLOUT_WRAP_MIN_CHARS_PER_LINE_SHORT
+                    : CALLOUT_WRAP_MIN_CHARS_PER_LINE;
                 const calloutMaxCharsPerLine = Math.max(
-                    CALLOUT_WRAP_MIN_CHARS_PER_LINE,
+                    calloutWrapMinChars,
                     Math.min(SUBTITLE_WRAP_MAX_CHARS_PER_LINE, calloutEstimatedChars)
                 );
                 const wrappedCalloutText = wrapTextForDrawText(rawCalloutText, calloutMaxCharsPerLine, normalizedClipLanguage);
@@ -4849,16 +4888,10 @@ class TTSServiceInstance {
 
             // callout（ASS typewriter）を焼き込む（上部中央）
             if (calloutAssPath) {
-                const escapeFilterValue = (value) => (
-                    String(value ?? '')
-                        .replace(/\\/g, '/')
-                        .replace(/:/g, '\\:')
-                        .replace(/'/g, "\\'")
-                );
                 const calloutFontsDir = path.join(getAssetsPath(), 'fonts');
                 complexFilters.push(
                     `${afterCaptionsLabel}` +
-                    `subtitles='${escapeFilterValue(calloutAssPath)}':fontsdir='${escapeFilterValue(calloutFontsDir)}'` +
+                    `subtitles='${escapeFfmpegFilterValue(calloutAssPath)}':fontsdir='${escapeFfmpegFilterValue(calloutFontsDir)}'` +
                     `[v_untrimmed]`
                 );
             } else {
