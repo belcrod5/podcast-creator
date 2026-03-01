@@ -302,6 +302,7 @@ const LANGUAGE_OPTIONS = [
 const DEFAULT_INTRO_BG_VIDEO_OPTIONS = [''];
 const DEFAULT_INSERT_VIDEO_PATH = 'videos/output.mp4';
 const DEFAULT_INSERT_VIDEO_MAPPING_PATH = `${DEFAULT_INSERT_VIDEO_PATH}.json`;
+const PODCAST_SAVE_FILE_SUFFIX = '.podcast-save.json';
 
 // 動画の出力形式（横長/ショート）
 // - landscape: 1920x1080
@@ -788,6 +789,7 @@ const PodCastCreator = () => {
     // まず、ローディング状態を示す状態変数を追加
     const [isLoadingImagesFromJson, setIsLoadingImagesFromJson] = useState(false);
     const [isRestoringFromSave, setIsRestoringFromSave] = useState(false);
+    const [isRestoreSaveDragOver, setIsRestoreSaveDragOver] = useState(false);
 
     // ステート変数の部分に追加
     const [dragOver, setDragOver] = useState(-1);
@@ -1286,148 +1288,134 @@ const PodCastCreator = () => {
         }
     };
 
-    const handleRestoreLatestSave = async () => {
-        if (!window?.electron?.podcastSaves?.read) {
-            alert('この環境ではセーブデータ復帰が利用できません');
-            return;
+    const applyRestoreRequest = useCallback(async (sourceData = {}) => {
+        const root = (sourceData && typeof sourceData === 'object' && sourceData !== null) ? sourceData : {};
+        const request = (root.request && typeof root.request === 'object' && root.request !== null)
+            ? root.request
+            : root;
+        if (!request || typeof request !== 'object' || request === null) {
+            throw new Error('セーブデータの形式が不正です');
         }
 
-        try {
-            setIsRestoringFromSave(true);
-            const response = await window.electron.podcastSaves.read({});
-            if (!response?.success || !response?.record?.request) {
-                alert('復帰できるセーブデータが見つかりませんでした');
-                return;
+        const youtube = (request && typeof request.youtube === 'object' && request.youtube !== null) ? request.youtube : {};
+        const runtimeOverrides = (request && typeof request.runtimeOverrides === 'object' && request.runtimeOverrides !== null)
+            ? request.runtimeOverrides
+            : {};
+
+        const restoredScriptItems = normalizeScriptItems(
+            Array.isArray(request.script) ? request.script : [],
+            { defaultInsertVideoPath: DEFAULT_INSERT_VIDEO_PATH }
+        );
+
+        const scriptSpeakerId = restoredScriptItems.find((item = {}) => item?.id || item?.speakerId);
+        const restoredSpeakerId = scriptSpeakerId?.id || scriptSpeakerId?.speakerId || formData.script.speakerId || availableSpeakerIds[0] || '';
+        const restoredLanguageRaw = runtimeOverrides.language
+            || restoredScriptItems.find((item = {}) => typeof item?.language === 'string')?.language
+            || formData.script.language
+            || 'ja';
+        const restoredLanguage = restoredLanguageRaw === 'en' ? 'en' : 'ja';
+        const restoredTags = Array.isArray(youtube.tags) ? youtube.tags.join(',') : (youtube.tags || '');
+        const restoredCategory = youtube.category || youtube.categoryId || '22';
+        const restoredBackgroundText = runtimeOverrides.backgroundText || youtube.title || '';
+        const restoredInsertVideoMappingPath = (
+            typeof request.insertVideoMapping === 'string' && request.insertVideoMapping.trim()
+        )
+            ? request.insertVideoMapping.trim()
+            : DEFAULT_INSERT_VIDEO_MAPPING_PATH;
+
+        setScriptItems(restoredScriptItems);
+        setInsertVideoMappingPath(restoredInsertVideoMappingPath);
+        setFormData(prev => ({
+            ...prev,
+            script: {
+                ...prev.script,
+                text: JSON.stringify(restoredScriptItems),
+                speakerId: restoredSpeakerId,
+                language: restoredLanguage
+            },
+            youtubeInfo: {
+                ...prev.youtubeInfo,
+                title: youtube.title || '',
+                description: youtube.description || '',
+                tags: restoredTags,
+                categoryId: restoredCategory,
+                thumbnailPath: youtube.thumbnailPath || ''
+            },
+            backgroundImage: {
+                ...prev.backgroundImage,
+                text: restoredBackgroundText
             }
+        }));
 
-            const request = response.record.request || {};
-            const youtube = (request && typeof request.youtube === 'object' && request.youtube !== null) ? request.youtube : {};
-            const runtimeOverrides = (request && typeof request.runtimeOverrides === 'object' && request.runtimeOverrides !== null)
-                ? request.runtimeOverrides
-                : {};
+        if (typeof youtube.fixedDescription === 'string') {
+            setFixedYoutubeDescription(youtube.fixedDescription);
+        }
 
-            const restoredScriptItems = normalizeScriptItems(
-                Array.isArray(request.script) ? request.script : [],
-                { defaultInsertVideoPath: DEFAULT_INSERT_VIDEO_PATH }
-            );
+        if (typeof request.preset === 'string' && request.preset.trim()) {
+            const presetId = request.preset.trim();
+            if (presets.some((preset) => preset?.id === presetId)) {
+                setSelectedPresetId(presetId);
+            }
+        }
 
-            const scriptSpeakerId = restoredScriptItems.find((item = {}) => item?.id || item?.speakerId);
-            const restoredSpeakerId = scriptSpeakerId?.id || scriptSpeakerId?.speakerId || formData.script.speakerId || availableSpeakerIds[0] || '';
-            const restoredLanguageRaw = runtimeOverrides.language
-                || restoredScriptItems.find((item = {}) => typeof item?.language === 'string')?.language
-                || formData.script.language
-                || 'ja';
-            const restoredLanguage = restoredLanguageRaw === 'en' ? 'en' : 'ja';
-            const restoredTags = Array.isArray(youtube.tags) ? youtube.tags.join(',') : (youtube.tags || '');
-            const restoredCategory = youtube.category || youtube.categoryId || '22';
-            const restoredBackgroundText = runtimeOverrides.backgroundText || youtube.title || '';
-            const restoredInsertVideoMappingPath = (
-                typeof request.insertVideoMapping === 'string' && request.insertVideoMapping.trim()
-            )
-                ? request.insertVideoMapping.trim()
-                : DEFAULT_INSERT_VIDEO_MAPPING_PATH;
+        if (typeof runtimeOverrides.videoFormat === 'string' && runtimeOverrides.videoFormat.trim()) {
+            setVideoFormat(normalizeVideoFormat(runtimeOverrides.videoFormat.trim()));
+        }
 
-            setScriptItems(restoredScriptItems);
-            setInsertVideoMappingPath(restoredInsertVideoMappingPath);
-            setFormData(prev => ({
+        if (Number.isFinite(Number(runtimeOverrides.playbackSpeed))) {
+            const clampedSpeed = Math.min(Math.max(Number(runtimeOverrides.playbackSpeed), 0.1), 2.0);
+            setPlaybackSpeed(clampedSpeed);
+        }
+
+        if (typeof runtimeOverrides.autoUpload === 'boolean') {
+            setAutoUploadToYoutube(runtimeOverrides.autoUpload);
+        }
+
+        if (typeof runtimeOverrides.speakerVideoPrefix === 'string') {
+            setFormData((prev) => ({
                 ...prev,
-                script: {
-                    ...prev.script,
-                    text: JSON.stringify(restoredScriptItems),
-                    speakerId: restoredSpeakerId,
-                    language: restoredLanguage
-                },
-                youtubeInfo: {
-                    ...prev.youtubeInfo,
-                    title: youtube.title || '',
-                    description: youtube.description || '',
-                    tags: restoredTags,
-                    categoryId: restoredCategory,
-                    thumbnailPath: youtube.thumbnailPath || ''
-                },
-                backgroundImage: {
-                    ...prev.backgroundImage,
-                    text: restoredBackgroundText
-                }
+                speakerVideoPrefix: runtimeOverrides.speakerVideoPrefix
             }));
+        }
 
-            if (typeof youtube.fixedDescription === 'string') {
-                setFixedYoutubeDescription(youtube.fixedDescription);
+        if (Number.isFinite(Number(runtimeOverrides.bgmVolume))) {
+            const nextVolume = Math.min(Math.max(Number(runtimeOverrides.bgmVolume), 0), 1);
+            setBgmVolume(nextVolume);
+        }
+
+        if (typeof runtimeOverrides.captionsEnabled === 'boolean') {
+            setCaptionsEnabled(runtimeOverrides.captionsEnabled);
+        }
+
+        if (typeof runtimeOverrides.introBgVideo === 'string') {
+            setSelectedIntroBgVideo(runtimeOverrides.introBgVideo);
+        }
+
+        const restoredYoutubeToken = (typeof runtimeOverrides.youtubeToken === 'string')
+            ? runtimeOverrides.youtubeToken.trim()
+            : '';
+        if (restoredYoutubeToken) {
+            setSelectedYoutubeToken(restoredYoutubeToken);
+            setYoutubeTokenFile(restoredYoutubeToken);
+            try {
+                await window.electron.tts.setYoutubeTokenFile(restoredYoutubeToken);
+            } catch (error) {
+                console.error('復帰時のYouTubeトークン設定に失敗しました:', error);
             }
+        } else {
+            setSelectedYoutubeToken('');
+            setYoutubeTokenFile('');
+        }
 
-            if (typeof request.preset === 'string' && request.preset.trim()) {
-                const presetId = request.preset.trim();
-                if (presets.some((preset) => preset?.id === presetId)) {
-                    setSelectedPresetId(presetId);
-                }
-            }
-
-            if (typeof runtimeOverrides.videoFormat === 'string' && runtimeOverrides.videoFormat.trim()) {
-                setVideoFormat(normalizeVideoFormat(runtimeOverrides.videoFormat.trim()));
-            }
-
-            if (Number.isFinite(Number(runtimeOverrides.playbackSpeed))) {
-                const clampedSpeed = Math.min(Math.max(Number(runtimeOverrides.playbackSpeed), 0.1), 2.0);
-                setPlaybackSpeed(clampedSpeed);
-            }
-
-            if (typeof runtimeOverrides.autoUpload === 'boolean') {
-                setAutoUploadToYoutube(runtimeOverrides.autoUpload);
-            }
-
-            if (typeof runtimeOverrides.speakerVideoPrefix === 'string') {
-                setFormData((prev) => ({
-                    ...prev,
-                    speakerVideoPrefix: runtimeOverrides.speakerVideoPrefix
-                }));
-            }
-
-            if (Number.isFinite(Number(runtimeOverrides.bgmVolume))) {
-                const nextVolume = Math.min(Math.max(Number(runtimeOverrides.bgmVolume), 0), 1);
-                setBgmVolume(nextVolume);
-            }
-
-            if (typeof runtimeOverrides.captionsEnabled === 'boolean') {
-                setCaptionsEnabled(runtimeOverrides.captionsEnabled);
-            }
-
-            if (typeof runtimeOverrides.introBgVideo === 'string') {
-                setSelectedIntroBgVideo(runtimeOverrides.introBgVideo);
-            }
-
-            const restoredYoutubeToken = (typeof runtimeOverrides.youtubeToken === 'string')
-                ? runtimeOverrides.youtubeToken.trim()
-                : '';
-            if (restoredYoutubeToken) {
-                setSelectedYoutubeToken(restoredYoutubeToken);
-                setYoutubeTokenFile(restoredYoutubeToken);
+        const restoredBgm = (typeof runtimeOverrides.bgm === 'string') ? runtimeOverrides.bgm.trim() : '';
+        if (restoredBgm) {
+            const targetBgm = bgmList.find((item) => item?.fileName === restoredBgm);
+            if (targetBgm?.path) {
+                setSelectedBgm(restoredBgm);
                 try {
-                    await window.electron.tts.setYoutubeTokenFile(restoredYoutubeToken);
+                    await window.electron.tts.setBgm(targetBgm.path);
                 } catch (error) {
-                    console.error('復帰時のYouTubeトークン設定に失敗しました:', error);
-                }
-            } else {
-                setSelectedYoutubeToken('');
-                setYoutubeTokenFile('');
-            }
-
-            const restoredBgm = (typeof runtimeOverrides.bgm === 'string') ? runtimeOverrides.bgm.trim() : '';
-            if (restoredBgm) {
-                const targetBgm = bgmList.find((item) => item?.fileName === restoredBgm);
-                if (targetBgm?.path) {
-                    setSelectedBgm(restoredBgm);
-                    try {
-                        await window.electron.tts.setBgm(targetBgm.path);
-                    } catch (error) {
-                        console.error('復帰時のBGM設定に失敗しました:', error);
-                    }
-                } else {
-                    setSelectedBgm('');
-                    try {
-                        await window.electron.tts.setBgm('');
-                    } catch (_) {
-                        /* ignore */
-                    }
+                    console.error('復帰時のBGM設定に失敗しました:', error);
                 }
             } else {
                 setSelectedBgm('');
@@ -1437,12 +1425,108 @@ const PodCastCreator = () => {
                     /* ignore */
                 }
             }
+        } else {
+            setSelectedBgm('');
+            try {
+                await window.electron.tts.setBgm('');
+            } catch (_) {
+                /* ignore */
+            }
+        }
 
-            setYoutubeTokenError(false);
-            setYoutubeTokenDialogOpen(false);
+        setYoutubeTokenError(false);
+        setYoutubeTokenDialogOpen(false);
+    }, [availableSpeakerIds, bgmList, formData.script.language, formData.script.speakerId, presets, setPlaybackSpeed, setYoutubeTokenFile]);
+
+    const handleRestoreLatestSave = async (options = {}) => {
+        if (!window?.electron?.podcastSaves?.read) {
+            alert('この環境ではセーブデータ復帰が利用できません');
+            return;
+        }
+
+        try {
+            setIsRestoringFromSave(true);
+            const readPayload = {};
+            if (typeof options.filePath === 'string' && options.filePath.trim()) {
+                readPayload.ref = options.filePath.trim();
+            } else if (typeof options.fileName === 'string' && options.fileName.trim()) {
+                readPayload.fileName = options.fileName.trim();
+            }
+
+            const response = await window.electron.podcastSaves.read(readPayload);
+            if (!response?.success || !response?.record?.request) {
+                alert('復帰できるセーブデータが見つかりませんでした');
+                return;
+            }
+
+            await applyRestoreRequest(response.record);
             alert(`セーブデータを復帰しました: ${response.record.id}`);
         } catch (error) {
             console.error('セーブデータ復帰エラー:', error);
+            alert(`セーブデータの復帰に失敗しました: ${error.message}`);
+        } finally {
+            setIsRestoringFromSave(false);
+        }
+    };
+
+    const handleRestoreSaveDragOver = (event) => {
+        event.preventDefault();
+        event.stopPropagation();
+        if (isLoadingImagesFromJson || isRestoringFromSave) return;
+        setIsRestoreSaveDragOver(true);
+        if (event.dataTransfer) {
+            event.dataTransfer.dropEffect = 'copy';
+        }
+    };
+
+    const handleRestoreSaveDragLeave = (event) => {
+        event.preventDefault();
+        event.stopPropagation();
+        setIsRestoreSaveDragOver(false);
+    };
+
+    const handleRestoreSaveDrop = async (event) => {
+        event.preventDefault();
+        event.stopPropagation();
+        setIsRestoreSaveDragOver(false);
+
+        if (isLoadingImagesFromJson || isRestoringFromSave) return;
+
+        const droppedFile = event?.dataTransfer?.files?.[0];
+        if (!droppedFile) return;
+
+        const droppedName = (typeof droppedFile.name === 'string') ? droppedFile.name.trim() : '';
+        const droppedPath = (typeof droppedFile.path === 'string') ? droppedFile.path.trim() : '';
+        const normalizedName = droppedName.toLowerCase();
+        const normalizedPath = droppedPath.toLowerCase();
+        const isValidSaveFile = normalizedName.endsWith(PODCAST_SAVE_FILE_SUFFIX) || normalizedPath.endsWith(PODCAST_SAVE_FILE_SUFFIX);
+
+        if (!isValidSaveFile) {
+            alert('xxxx.podcast-save.json をドロップしてください');
+            return;
+        }
+
+        if (droppedPath) {
+            await handleRestoreLatestSave({ filePath: droppedPath });
+            return;
+        }
+
+        try {
+            setIsRestoringFromSave(true);
+            const rawText = await droppedFile.text();
+            const parsed = JSON.parse(rawText);
+            const hasRequest = !!(parsed && typeof parsed === 'object' && (parsed.request || parsed.script || parsed.youtube));
+            if (!hasRequest) {
+                throw new Error('セーブデータの形式が不正です');
+            }
+
+            await applyRestoreRequest(parsed);
+            const restoredId = (parsed && typeof parsed.id === 'string' && parsed.id.trim())
+                ? parsed.id.trim()
+                : droppedName;
+            alert(`セーブデータを復帰しました: ${restoredId}`);
+        } catch (error) {
+            console.error('ドロップファイル復帰エラー:', error);
             alert(`セーブデータの復帰に失敗しました: ${error.message}`);
         } finally {
             setIsRestoringFromSave(false);
@@ -3025,8 +3109,16 @@ const PodCastCreator = () => {
                         <Button
                             variant="outlined"
                             onClick={handleRestoreLatestSave}
+                            onDragOver={handleRestoreSaveDragOver}
+                            onDragLeave={handleRestoreSaveDragLeave}
+                            onDrop={handleRestoreSaveDrop}
                             disabled={isLoadingImagesFromJson || isRestoringFromSave}
-                            sx={{ mr: 1 }}
+                            sx={{
+                                mr: 1,
+                                borderStyle: isRestoreSaveDragOver ? 'dashed' : 'solid',
+                                borderColor: isRestoreSaveDragOver ? 'primary.main' : undefined,
+                                backgroundColor: isRestoreSaveDragOver ? 'action.hover' : 'transparent'
+                            }}
                         >
                             前回から復帰
                         </Button>
