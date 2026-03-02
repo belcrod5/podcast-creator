@@ -6,7 +6,8 @@ contextBridge.exposeInMainWorld('electron', {
         create: (payload) => ipcRenderer.invoke('podcast-save-create', payload),
         list: (payload) => ipcRenderer.invoke('podcast-save-list', payload),
         read: (payload) => ipcRenderer.invoke('podcast-save-read', payload),
-        updateResult: (payload) => ipcRenderer.invoke('podcast-save-update-result', payload)
+        updateResult: (payload) => ipcRenderer.invoke('podcast-save-update-result', payload),
+        appendLog: (payload) => ipcRenderer.invoke('podcast-save-append-log', payload)
     },
     settings: {
         getWorkDir: () => ipcRenderer.invoke('app-get-work-dir'),

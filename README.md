@@ -168,6 +168,7 @@ node electron/cli/podcast-runner.js \
   見つからない場合は警告のみでスキップします。
 - CLIは `processing-complete` まで待機し、成功時は exit code 0 / 失敗時は 1。
 - GUI/CLIどちらの実行でも、実行内容は `<workdir>/.podcast-creator/saves/` にセーブされます。
+- GUI/CLIどちらの実行でも、実行ログは `<workdir>/.podcast-creator/logs/<save-id>.podcast-save.log` に追記されます。
 - `--resume latest` で最新セーブを再実行できます。
 
 ※ UIと同じ生成パイプラインを使うため、AivisSpeech / ImageMagick / FFmpeg のセットアップはGUIと同様に必要です。

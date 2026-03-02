@@ -7,6 +7,8 @@ const SAVE_SCHEMA_VERSION = 1;
 const SAVE_ROOT_DIR = '.podcast-creator';
 const SAVE_SUB_DIR = 'saves';
 const SAVE_FILE_SUFFIX = '.podcast-save.json';
+const LOG_SUB_DIR = 'logs';
+const LOG_FILE_SUFFIX = '.podcast-save.log';
 
 const DEFAULT_INSERT_VIDEO_PATH = 'videos/output.mp4';
 const DEFAULT_INSERT_VIDEO_MAPPING_PATH = `${DEFAULT_INSERT_VIDEO_PATH}.json`;
@@ -53,6 +55,7 @@ const normalizeNumber = (value, fallback, { min = null, max = null } = {}) => {
 };
 
 const getSaveDir = (workDir) => path.join(workDir, SAVE_ROOT_DIR, SAVE_SUB_DIR);
+const getLogDir = (workDir) => path.join(workDir, SAVE_ROOT_DIR, LOG_SUB_DIR);
 
 const sanitizeSlug = (value) => {
     const slug = ensureString(value, 'podcast')
@@ -94,6 +97,26 @@ const resolveSaveFilePath = ({ workDir, id, fileName, filePath } = {}) => {
             ? id.trim()
             : `${id.trim()}${SAVE_FILE_SUFFIX}`;
         return path.join(saveDir, normalized);
+    }
+
+    return null;
+};
+
+const resolveLogFilePath = ({ workDir, id, fileName, filePath } = {}) => {
+    if (!workDir || typeof workDir !== 'string') return null;
+    const logDir = getLogDir(workDir);
+
+    if (typeof filePath === 'string' && filePath.trim()) {
+        const trimmed = filePath.trim();
+        return path.isAbsolute(trimmed) ? trimmed : path.join(workDir, trimmed);
+    }
+
+    if (typeof fileName === 'string' && fileName.trim()) {
+        return path.join(logDir, fileName.trim());
+    }
+
+    if (typeof id === 'string' && id.trim()) {
+        return path.join(logDir, `${id.trim()}${LOG_FILE_SUFFIX}`);
     }
 
     return null;
@@ -495,11 +518,61 @@ const updateSaveRecordResult = ({ workDir, id, fileName, filePath, result } = {}
     };
 };
 
+const normalizeLogLevel = (level) => {
+    const normalized = ensureString(level, 'info').trim().toLowerCase();
+    if (normalized === 'warn' || normalized === 'error' || normalized === 'debug') return normalized;
+    return 'info';
+};
+
+const appendSaveLog = ({
+    workDir,
+    id,
+    fileName,
+    filePath,
+    level = 'info',
+    message = '',
+    meta = null,
+    timestamp = new Date().toISOString()
+} = {}) => {
+    if (!workDir || typeof workDir !== 'string') {
+        throw new Error('workDir is required');
+    }
+
+    const targetPath = resolveLogFilePath({ workDir, id, fileName, filePath });
+    if (!targetPath) {
+        throw new Error('log target is required');
+    }
+
+    const dir = path.dirname(targetPath);
+    fs.mkdirSync(dir, { recursive: true });
+
+    const logLevel = normalizeLogLevel(level);
+    const baseMessage = ensureString(message, '').replace(/\r\n/g, '\n').replace(/\r/g, '\n');
+    const oneLineMessage = baseMessage.split('\n').join(' | ');
+    let metaText = '';
+    if (meta !== null && meta !== undefined) {
+        try {
+            metaText = ` ${JSON.stringify(meta)}`;
+        } catch (_) {
+            metaText = ' [meta:unserializable]';
+        }
+    }
+    const line = `[${timestamp}] [${logLevel.toUpperCase()}] ${oneLineMessage}${metaText}\n`;
+    fs.appendFileSync(targetPath, line, 'utf8');
+
+    return {
+        filePath: targetPath,
+        fileName: path.basename(targetPath)
+    };
+};
+
 module.exports = {
     SAVE_SCHEMA_VERSION,
     SAVE_ROOT_DIR,
     SAVE_SUB_DIR,
     SAVE_FILE_SUFFIX,
+    LOG_SUB_DIR,
+    LOG_FILE_SUFFIX,
     DEFAULT_INSERT_VIDEO_PATH,
     DEFAULT_INSERT_VIDEO_MAPPING_PATH,
     buildCanonicalRequest,
@@ -510,5 +583,7 @@ module.exports = {
     listSaveRecords,
     loadSaveRecord,
     updateSaveRecordResult,
-    getSaveDir
+    appendSaveLog,
+    getSaveDir,
+    getLogDir
 };

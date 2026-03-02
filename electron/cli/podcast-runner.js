@@ -10,7 +10,8 @@ const {
     createSaveRecord,
     writeSaveRecord,
     loadSaveRecord,
-    updateSaveRecordResult
+    updateSaveRecordResult,
+    appendSaveLog
 } = require('../../shared/podcast-save-data');
 
 const PRESET_CONFIG_PATH = 'data/podcastcreator-preset.json';
@@ -207,6 +208,46 @@ const runPodcastRunner = async ({
 } = {}) => {
     let saveRecordRef = null;
     let normalizedWorkDir = null;
+    const baseLog = (log && typeof log === 'object') ? log : console;
+    const pendingLogEntries = [];
+    const appendRunnerLog = (level, message, meta) => {
+        const text = (typeof message === 'string') ? message : String(message ?? '');
+        const normalizedLevel = (level === 'warn' || level === 'error') ? level : 'info';
+        const outputMethod = (typeof baseLog[normalizedLevel] === 'function')
+            ? baseLog[normalizedLevel].bind(baseLog)
+            : (typeof baseLog.log === 'function')
+                ? baseLog.log.bind(baseLog)
+                : console.log.bind(console);
+        outputMethod(text);
+
+        const entry = {
+            level: normalizedLevel,
+            message: text,
+            meta,
+            timestamp: new Date().toISOString()
+        };
+
+        if (saveRecordRef?.id && normalizedWorkDir) {
+            try {
+                appendSaveLog({
+                    workDir: normalizedWorkDir,
+                    id: saveRecordRef.id,
+                    level: entry.level,
+                    message: entry.message,
+                    meta: entry.meta,
+                    timestamp: entry.timestamp
+                });
+            } catch (_) {
+                // ignore log write errors
+            }
+            return;
+        }
+
+        if (pendingLogEntries.length >= 500) {
+            pendingLogEntries.shift();
+        }
+        pendingLogEntries.push(entry);
+    };
     try {
         normalizedWorkDir = (typeof workDir === 'string' && workDir.trim()) ? workDir.trim() : null;
         if (!normalizedWorkDir) {
@@ -227,7 +268,7 @@ const runPodcastRunner = async ({
             workDir: normalizedWorkDir
         });
         if (loadedSave?.filePath) {
-            log.info?.(`[resume] loaded save: ${loadedSave.filePath}`);
+            appendRunnerLog('info', `[resume] loaded save: ${loadedSave.filePath}`);
         }
 
         const missingPodcastFields = getMissingKeys(podcast, PODCAST_REQUIRED_FIELDS);
@@ -406,13 +447,13 @@ const runPodcastRunner = async ({
                         const errorKey = `${candidate}|${loaded.resolvedPath}|${loaded.error}`;
                         if (!reportedCandidateErrors.has(errorKey)) {
                             reportedCandidateErrors.add(errorKey);
-                            log.warn?.(`[InsertVideoAdjust] Mapping load failed: ${loaded.resolvedPath} (${loaded.error})`);
+                            appendRunnerLog('warn', `[InsertVideoAdjust] Mapping load failed: ${loaded.resolvedPath} (${loaded.error})`);
                         }
                     }
                 }
 
                 if (!chosenPath) {
-                    log.warn?.(
+                    appendRunnerLog('warn',
                         `[InsertVideoAdjust] Mapping file not found for insert_video. ` +
                         `start=${item?.startTime || item?.start_time || '-'} end=${item?.endTime || item?.end_time || '-'} ` +
                         `path=${item?.insert_video || item?.videoPath || item?.path || '-'} candidates=${candidateList.join(', ')}`
@@ -439,13 +480,13 @@ const runPodcastRunner = async ({
                     });
                     scriptItems = updatedScriptItems;
                     if (unmatchedItems.length) {
-                        log.warn?.(`[InsertVideoAdjust] Unmatched insert_video items: ${unmatchedItems.length} (mapping: ${loaded.resolvedPath || mappingPath})`);
+                        appendRunnerLog('warn', `[InsertVideoAdjust] Unmatched insert_video items: ${unmatchedItems.length} (mapping: ${loaded.resolvedPath || mappingPath})`);
                         unmatchedItems.forEach((item) => {
-                            log.warn?.(`[InsertVideoAdjust] Unmatched start=${item.startTime || '-'} end=${item.endTime || '-'} text=${item.text || ''}`);
+                            appendRunnerLog('warn', `[InsertVideoAdjust] Unmatched start=${item.startTime || '-'} end=${item.endTime || '-'} text=${item.text || ''}`);
                         });
                     }
                 } catch (error) {
-                    log.warn?.(`[InsertVideoAdjust] Failed to apply mapping (${loaded.resolvedPath || mappingPath}). Skipping: ${error.message}`);
+                    appendRunnerLog('warn', `[InsertVideoAdjust] Failed to apply mapping (${loaded.resolvedPath || mappingPath}). Skipping: ${error.message}`);
                 }
             });
         }
@@ -526,14 +567,36 @@ const runPodcastRunner = async ({
                 id: createdSave.record.id,
                 filePath: writtenSave.filePath
             };
-            log.info?.(`[save] created: ${writtenSave.filePath}`);
+            if (pendingLogEntries.length) {
+                pendingLogEntries.forEach((entry) => {
+                    try {
+                        appendSaveLog({
+                            workDir: normalizedWorkDir,
+                            id: saveRecordRef.id,
+                            level: entry.level,
+                            message: entry.message,
+                            meta: entry.meta,
+                            timestamp: entry.timestamp
+                        });
+                    } catch (_) {
+                        // ignore log write errors
+                    }
+                });
+                pendingLogEntries.length = 0;
+            }
+            appendRunnerLog('info', `[save] created: ${writtenSave.filePath}`, {
+                saveId: saveRecordRef.id
+            });
         } catch (error) {
-            log.warn?.(`[save] failed to create save record: ${error.message}`);
+            appendRunnerLog('warn', `[save] failed to create save record: ${error.message}`);
         }
 
         const progressHandler = (data) => {
             if (!data || !data.type) return;
-            log.info?.(`[progress] ${data.type}: ${formatProgress(data.progress)}`);
+            appendRunnerLog('info', `[progress] ${data.type}: ${formatProgress(data.progress)}`, {
+                type: data.type,
+                progress: data.progress
+            });
         };
 
         const processingComplete = new Promise((resolve, reject) => {
@@ -599,7 +662,7 @@ const runPodcastRunner = async ({
                     }
                 });
             } catch (error) {
-                log.warn?.(`[save] failed to update completed result: ${error.message}`);
+                appendRunnerLog('warn', `[save] failed to update completed result: ${error.message}`);
             }
         }
         return 0;
@@ -616,10 +679,10 @@ const runPodcastRunner = async ({
                     }
                 });
             } catch (saveError) {
-                log.warn?.(`[save] failed to update error result: ${saveError.message}`);
+                appendRunnerLog('warn', `[save] failed to update error result: ${saveError.message}`);
             }
         }
-        log.error?.(error?.message || String(error));
+        appendRunnerLog('error', error?.message || String(error));
         return 1;
     }
 };

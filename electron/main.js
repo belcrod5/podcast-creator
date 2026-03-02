@@ -16,7 +16,8 @@ const {
     writeSaveRecord,
     listSaveRecords,
     loadSaveRecord,
-    updateSaveRecordResult
+    updateSaveRecordResult,
+    appendSaveLog
 } = require('../shared/podcast-save-data');
 
 // tts-service.jsと同じパス定義を追加
@@ -564,6 +565,34 @@ async function setupTTSHandler(mainWindow) {
             };
         } catch (error) {
             console.error('セーブデータ更新エラー:', error);
+            return { success: false, error: error.message };
+        }
+    });
+
+    ipcMain.handle('podcast-save-append-log', async (_, payload = {}) => {
+        try {
+            const workDir = getWorkDir();
+            if (!workDir) {
+                return { success: false, error: '作業ディレクトリが未設定です' };
+            }
+
+            const appended = appendSaveLog({
+                workDir,
+                id: payload?.id,
+                fileName: payload?.fileName,
+                filePath: payload?.ref,
+                level: payload?.level,
+                message: payload?.message,
+                meta: payload?.meta
+            });
+
+            return {
+                success: true,
+                filePath: appended.filePath,
+                fileName: appended.fileName
+            };
+        } catch (error) {
+            console.error('セーブログ追記エラー:', error);
             return { success: false, error: error.message };
         }
     });
