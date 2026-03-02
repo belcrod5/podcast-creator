@@ -498,6 +498,9 @@ exports.PodCastProvider = ({ children }) => {
             if (typeof queueRuntimeOverrides.introBgVideo === 'string') {
                 await tts.setIntroBgVideo(queueRuntimeOverrides.introBgVideo);
             }
+            if (typeof tts.setIntroBgVideoBgm === 'function') {
+                await tts.setIntroBgVideoBgm(Boolean(queueRuntimeOverrides.introBgVideoBgm));
+            }
 
             // 自動生成とアップロードの設定を先に行う
             await tts.setAutoGenerateVideo(true);

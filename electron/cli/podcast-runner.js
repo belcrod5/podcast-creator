@@ -336,6 +336,9 @@ const runPodcastRunner = async ({
         const effectiveIntroBgVideo = (typeof runtimeOverrides.introBgVideo === 'string')
             ? runtimeOverrides.introBgVideo.trim()
             : preset.introBgVideo;
+        const effectiveIntroBgVideoBgm = (typeof runtimeOverrides.introBgVideoBgm === 'boolean')
+            ? runtimeOverrides.introBgVideoBgm
+            : (typeof preset.introBgVideoBgm === 'boolean' ? preset.introBgVideoBgm : false);
 
         if (typeof ttsService.setYoutubeTokenFile === 'function' && effectiveYoutubeToken) {
             ttsService.setYoutubeTokenFile(effectiveYoutubeToken);
@@ -518,6 +521,9 @@ const runPodcastRunner = async ({
         if (typeof ttsService.setIntroBgVideo === 'function') {
             ttsService.setIntroBgVideo(effectiveIntroBgVideo);
         }
+        if (typeof ttsService.setIntroBgVideoBgm === 'function') {
+            ttsService.setIntroBgVideoBgm(effectiveIntroBgVideoBgm);
+        }
         if (typeof ttsService.setSpeakerVideoPrefix === 'function') {
             ttsService.setSpeakerVideoPrefix(effectiveSpeakerVideoPrefix);
         }
@@ -547,6 +553,7 @@ const runPodcastRunner = async ({
                         bgmVolume: effectiveBgmVolume,
                         captionsEnabled: effectiveCaptionsEnabled,
                         introBgVideo: effectiveIntroBgVideo,
+                        introBgVideoBgm: effectiveIntroBgVideoBgm,
                         backgroundText: runtimeOverrides.backgroundText || youtubeInfo.title,
                         language: effectiveLanguage
                     }

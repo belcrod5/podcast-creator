@@ -161,6 +161,7 @@ const normalizeRuntimeOverrides = (raw = {}) => {
         bgmVolume: normalizeNumber(source.bgmVolume, 0.2, { min: 0, max: 1 }),
         captionsEnabled: normalizeBoolean(source.captionsEnabled, true),
         introBgVideo: ensureString(source.introBgVideo, ''),
+        introBgVideoBgm: normalizeBoolean(source.introBgVideoBgm, false),
         backgroundText: ensureString(source.backgroundText, ''),
         language: ensureString(source.language, '')
     };

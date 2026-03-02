@@ -133,6 +133,7 @@ contextBridge.exposeInMainWorld('electron', {
         // イントロ背景動画関連
         getIntroBgVideos: () => ipcRenderer.invoke('tts-get-intro-bg-videos'),
         setIntroBgVideo: (videoNameOrPath) => ipcRenderer.invoke('tts-set-intro-bg-video', videoNameOrPath),
+        setIntroBgVideoBgm: (enabled) => ipcRenderer.invoke('tts-set-intro-bg-video-bgm', enabled),
         readJsonFile: async (filePath) => {
             try {
                 return await ipcRenderer.invoke('tts-read-json-file', filePath);

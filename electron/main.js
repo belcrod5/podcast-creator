@@ -712,6 +712,16 @@ async function setupTTSHandler(mainWindow) {
         }
     });
 
+    ipcMain.handle('tts-set-intro-bg-video-bgm', async (_, enabled) => {
+        try {
+            const applied = ttsService.setIntroBgVideoBgm(enabled);
+            return { success: true, introBgVideoBgm: applied };
+        } catch (error) {
+            console.error('Error setting intro background video BGM mode:', error);
+            throw error;
+        }
+    });
+
     ipcMain.handle('tts-read-json-file', async (_, targetPath) => {
         try {
             if (!targetPath) {

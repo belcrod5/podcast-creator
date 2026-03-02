@@ -456,6 +456,7 @@ const PodCastCreator = () => {
             return DEFAULT_INTRO_BG_VIDEO_OPTIONS[0];
         }
     });
+    const [introBgVideoBgm, setIntroBgVideoBgm] = useState(false);
     const [bgmVolume, setBgmVolume] = useState(() => {
         try {
             const saved = localStorage.getItem('tts-bgm-volume');
@@ -715,6 +716,7 @@ const PodCastCreator = () => {
                 ? pendingPreset.introBgVideo.trim()
                 : '';
             setSelectedIntroBgVideo(normalizedIntroBgVideo);
+            setIntroBgVideoBgm(Boolean(pendingPreset.introBgVideoBgm));
 
             if (typeof pendingPreset.fixedDescription === 'string') {
                 setFixedYoutubeDescription(pendingPreset.fixedDescription);
@@ -895,6 +897,14 @@ const PodCastCreator = () => {
             /* ignore */
         }
     }, [selectedIntroBgVideo]);
+
+    useEffect(() => {
+        const setter = window.electron?.tts?.setIntroBgVideoBgm;
+        if (typeof setter !== 'function') return;
+        setter(Boolean(introBgVideoBgm)).catch((error) => {
+            console.error('イントロ動画音声優先設定の反映に失敗しました:', error);
+        });
+    }, [introBgVideoBgm]);
 
     // YouTube認証URLを取得
     const handleGetYoutubeAuthUrl = useCallback(async () => {
@@ -1390,6 +1400,7 @@ const PodCastCreator = () => {
         if (typeof runtimeOverrides.introBgVideo === 'string') {
             setSelectedIntroBgVideo(runtimeOverrides.introBgVideo);
         }
+        setIntroBgVideoBgm(Boolean(runtimeOverrides.introBgVideoBgm));
 
         const restoredYoutubeToken = (typeof runtimeOverrides.youtubeToken === 'string')
             ? runtimeOverrides.youtubeToken.trim()
@@ -1948,6 +1959,7 @@ const PodCastCreator = () => {
                 bgmVolume,
                 captionsEnabled,
                 introBgVideo: selectedIntroBgVideo || '',
+                introBgVideoBgm: Boolean(introBgVideoBgm),
                 backgroundText: formData.backgroundImage.text || formData.youtubeInfo.title || '',
                 language: formData.script.language || 'ja'
             }

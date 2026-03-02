@@ -823,6 +823,10 @@ class TTSServiceMain extends EventEmitter {
      */
     currentIntroBgVideo = null;
     /**
+     * true の場合、イントロ動画の音声を使用し、イントロ区間のBGMを止める
+     */
+    currentIntroBgVideoBgm = false;
+    /**
      * 字幕（drawtext）の表示ON/OFF
      */
     captionsEnabled = true;
@@ -923,6 +927,25 @@ class TTSServiceMain extends EventEmitter {
         });
 
         return this.currentIntroBgVideo;
+    }
+
+    setIntroBgVideoBgm(enabled) {
+        const normalized = (typeof enabled === 'boolean')
+            ? enabled
+            : (typeof enabled === 'string' ? enabled.trim().toLowerCase() === 'true' : Boolean(enabled));
+        this.currentIntroBgVideoBgm = normalized;
+
+        if (this.currentInstance && typeof this.currentInstance.setIntroBgVideoBgm === 'function') {
+            this.currentInstance.setIntroBgVideoBgm(normalized);
+        }
+
+        this.instances.forEach((instance) => {
+            if (instance && typeof instance.setIntroBgVideoBgm === 'function') {
+                instance.setIntroBgVideoBgm(normalized);
+            }
+        });
+
+        return this.currentIntroBgVideoBgm;
     }
 
     setYoutubeTokenFile(tokenFileName) {
@@ -1104,6 +1127,7 @@ class TTSServiceMain extends EventEmitter {
             instance.currentBgmPath = this.currentBgmPath;
             instance.setBgmVolume(this.currentBgmVolume);
             instance.setIntroBgVideo(this.currentIntroBgVideo);
+            instance.setIntroBgVideoBgm(this.currentIntroBgVideoBgm);
             if (typeof instance.setCaptionsEnabled === 'function') {
                 instance.setCaptionsEnabled(this.captionsEnabled);
             }
@@ -1131,6 +1155,12 @@ class TTSServiceMain extends EventEmitter {
             }
             if (typeof this.currentInstance.setBgmVolume === 'function') {
                 this.currentInstance.setBgmVolume(this.currentBgmVolume);
+            }
+            if (typeof this.currentInstance.setIntroBgVideo === 'function') {
+                this.currentInstance.setIntroBgVideo(this.currentIntroBgVideo);
+            }
+            if (typeof this.currentInstance.setIntroBgVideoBgm === 'function') {
+                this.currentInstance.setIntroBgVideoBgm(this.currentIntroBgVideoBgm);
             }
             if (typeof this.currentInstance.setCaptionsEnabled === 'function') {
                 this.currentInstance.setCaptionsEnabled(this.captionsEnabled);
@@ -1874,6 +1904,7 @@ class TTSServiceInstance {
         this.youtubeTokenFile = 'youtube-token.json';
         this.youtubeUploader = null;
         this.introBgVideoPath = null;
+        this.introBgVideoBgm = false;
         this.captionsEnabled = true;
         this.videoFormat = VIDEO_FORMATS.LANDSCAPE;
     }
@@ -1896,6 +1927,12 @@ class TTSServiceInstance {
         }
         const trimmed = videoPath.trim();
         this.introBgVideoPath = trimmed ? trimmed : null;
+    }
+
+    setIntroBgVideoBgm(enabled) {
+        this.introBgVideoBgm = (typeof enabled === 'boolean')
+            ? enabled
+            : (typeof enabled === 'string' ? enabled.trim().toLowerCase() === 'true' : Boolean(enabled));
     }
 
     setYoutubeTokenFile(tokenFileName) {
@@ -3807,9 +3844,12 @@ class TTSServiceInstance {
 
                     const bgmTimer = performanceLogger.startTimer('addBgmToVideo');
                     const losslessOutputPath = path.join(TEMP_DIR, `final_lossless_${Date.now()}.mkv`);
+                    const introBgmMuteDuration = (this.introBgVideoBgm && (this.introClipDuration || 0) > 0)
+                        ? this.introClipDuration
+                        : 0;
                     videoWithBgm = await this._addBgmToVideo(finalVideo, losslessOutputPath, originalDuration, progress => {
                         if (onProgress) onProgress(0.6 + progress * 0.2); // BGM追加は進捗の60-80%を占める
-                    });
+                    }, { introBgmMuteDuration });
                     bgmTimer.end({ videoWithBgm });
                 } else if (this.currentBgmPath) {
                     console.warn(`BGMファイルが見つからないためスキップします: ${this.currentBgmPath}`);
@@ -5282,14 +5322,20 @@ class TTSServiceInstance {
      * @param {string} outputPath - 出力パス
      * @param {number} duration - 動画の長さ
      * @param {Function} onProgress - 進捗コールバック
+     * @param {Object} options
+     * @param {number} options.introBgmMuteDuration - イントロ区間のBGMミュート秒数
      * @returns {Promise<string>} - 出力ファイルのパス
      */
-    async _addBgmToVideo(videoPath, outputPath, duration, onProgress) {
+    async _addBgmToVideo(videoPath, outputPath, duration, onProgress, options = {}) {
         const timer = performanceLogger.startTimer('addBgmToVideo');
+        const introBgmMuteDuration = Number.isFinite(Number(options.introBgmMuteDuration))
+            ? Math.max(0, Number(options.introBgmMuteDuration))
+            : 0;
         performanceLogger.addLog('addBgmToVideo_start', {
             videoPath,
             outputPath,
-            duration
+            duration,
+            introBgmMuteDuration
         });
 
         console.log(`[DEBUG] BGM追加開始 - 入力動画: ${videoPath}, 出力: ${outputPath}, 予想長さ: ${duration}秒`);
@@ -5369,11 +5415,19 @@ class TTSServiceInstance {
 
             // 音声フィルター
             complexFilters.push(`[0:a]${audioFilters.join(',')}[a1]`);
-            complexFilters.push(`[1:a]volume=${bgmVolume}[a2]`);
+            const introDelayMs = Math.round(introBgmMuteDuration * 1000);
+            if (introDelayMs > 0) {
+                complexFilters.push(`[1:a]volume=${bgmVolume},adelay=${introDelayMs}|${introDelayMs}[a2]`);
+            } else {
+                complexFilters.push(`[1:a]volume=${bgmVolume}[a2]`);
+            }
             // BGM を映像の最後まで鳴らしたいので、amix は duration=longest を使用
             // dropout_transition=0 でフェード等を無効化（切替時の不意な減衰を防止）
             complexFilters.push(`[a1][a2]amix=inputs=2:duration=longest:dropout_transition=0[aout]`);
             console.log(`[DEBUG] BGM処理 - amix=duration=longest:dropout_transition=0`);
+            if (introDelayMs > 0) {
+                console.log(`[DEBUG] BGM処理 - イントロ区間 ${introBgmMuteDuration}秒 はBGMを遅延再生`);
+            }
 
             // デバッグのためにフィルター設定をログ出力
             console.log(`[DEBUG] BGM処理 - フィルター: ${JSON.stringify(complexFilters)}`);
@@ -5467,10 +5521,18 @@ class TTSServiceInstance {
      */
     async _createIntroClip(bgPath, outputPath, duration, options = {}) {
         const timer = performanceLogger.startTimer('createIntroClip');
+        const ext = path.extname(bgPath).toLowerCase();
+        const isVideo = options.isVideo ?? VIDEO_EXTENSIONS.has(ext);
+        const shouldUseVideoAudio = Boolean(isVideo && this.introBgVideoBgm);
+        const hasIntroSourceAudio = shouldUseVideoAudio ? await hasAudioStream(bgPath) : false;
+        const useOriginalIntroAudio = shouldUseVideoAudio && hasIntroSourceAudio;
+
         performanceLogger.addLog('createIntroClip_start', {
             bgPath,
             outputPath,
-            duration
+            duration,
+            isVideo,
+            useOriginalIntroAudio
         });
 
         const layout = getVideoLayout(this.videoFormat);
@@ -5478,9 +5540,6 @@ class TTSServiceInstance {
 
         return new Promise((resolve, reject) => {
             const command = ffmpeg();
-
-            const ext = path.extname(bgPath).toLowerCase();
-            const isVideo = options.isVideo ?? VIDEO_EXTENSIONS.has(ext);
 
             if (isVideo) {
                 const inputOptions = [];
@@ -5494,13 +5553,15 @@ class TTSServiceInstance {
                     .inputOptions(['-t', `${duration || 2}`]);
             }
 
-            // 無音オーディオトラックを生成
-            command.input('anullsrc')
-                .inputOptions(['-f', 'lavfi'])
-                .inputOptions(['-t', `${duration || 2}`]);
+            if (!useOriginalIntroAudio) {
+                // イントロ動画の音声を使わない場合は、無音オーディオトラックを生成
+                command.input('anullsrc')
+                    .inputOptions(['-f', 'lavfi'])
+                    .inputOptions(['-t', `${duration || 2}`]);
+            }
 
             // 出力設定（可逆圧縮形式）
-            command.outputOptions([
+            const outputOptions = [
                 '-c:v', 'libx264',
                 '-preset', 'ultrafast',
                 '-crf', '23',
@@ -5508,11 +5569,15 @@ class TTSServiceInstance {
                 '-r', '30',
                 '-s', extent,
                 '-vf', 'fps=30,format=yuv420p',
+                '-map', '0:v:0',
+                '-map', useOriginalIntroAudio ? '0:a:0?' : '1:a:0',
                 '-c:a', 'aac',
                 '-b:a', '256k',
                 '-threads', '0',
                 '-shortest'
-            ])
+            ];
+
+            command.outputOptions(outputOptions)
                 .output(outputPath)
                 .on('start', (cmd) => {
                     console.log('イントロクリップ作成開始:', cmd);
