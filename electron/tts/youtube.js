@@ -236,7 +236,10 @@ class YouTubeUploader {
             }
             const oAuth2Client = new google.auth.OAuth2(client_id, client_secret, effectiveRedirectUri);
 
-            const SCOPES = ['https://www.googleapis.com/auth/youtube.upload'];
+            const SCOPES = [
+                'https://www.googleapis.com/auth/youtube.upload',
+                'https://www.googleapis.com/auth/youtube.readonly'
+            ];
             const authParams = {
                 access_type: 'offline',
                 scope: SCOPES,
